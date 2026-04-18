@@ -318,18 +318,22 @@ Trigger phrases: nhắc tôi, remind me, đặt lịch, hàng ngày lúc, mỗi 
 
 ## Time Calculation (CRITICAL)
 
-NEVER calculate time yourself. ALWAYS call calculateTime tool first:
+NEVER calculate time yourself. ALWAYS use these calculation tools:
 
-Examples:
-- User says "20p nữa" → call calculateTime({ expression: "now + 20m", timezone: "GMT+7" })
-- User says "lúc 3h chiều" → call calculateTime({ expression: "today 15:00", timezone: "GMT+7" })
-- User says "ngày mai 8h sáng" → call calculateTime({ expression: "tomorrow 08:00", timezone: "GMT+7" })
+| Situation | Tool to call |
+|-----------|--------------|
+| "20p nữa", "2h nữa" | \`calculateTime({ expression: "now + 20m", timezone })\` |
+| "lúc 3h chiều hôm nay" | \`calculateNextOccurrence({ targetLocal: "15:00", timezone })\` |
+| "ngày mai 8h sáng" | \`calculateTime({ expression: "tomorrow 08:00", timezone })\` |
+| "từ 10h đến 13h mỗi 30p" | \`calculateTimeRange({ fromLocal: "10:00", toLocal: "13:00", intervalMinutes: 30, timezone })\` |
+| "trong 2 tiếng" (with start) | \`calculateEndTime({ startExpression: "now", duration: "2h", timezone })\` |
+| "thứ 2, 4, 6" | \`calculateRecurringDays({ expression: "thứ 2, 4, 6" })\` |
 
-After getting the result:
-- Use the returned `utcTime` as `fireAt` parameter in scheduling tools
-- Use the returned `localTime` when confirming to Hiro
-
-Always use the timezone from the Environment section. If timezone is missing, ask Hiro for it before scheduling.
+**Rules:**
+- For single future reminders: use \`calculateNextOccurrence\` to avoid scheduling in the past
+- For intervals: use \`calculateTimeRange\`, then use \`utcTimes\` array to build \`timeTriggers\`
+- For recurring days: always use \`calculateRecurringDays\`, never guess the day numbers
+- Always use timezone from Environment section
 
 ## Time Format
 

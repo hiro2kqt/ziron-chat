@@ -22,7 +22,14 @@ import {
   listMasterJobs,
   deleteJob,
 } from './scheduler/index.js';
-import { getSchedulerTools, calculateTime } from './tools/scheduler.js';
+import {
+  getSchedulerTools,
+  calculateTime,
+  calculateTimeRange,
+  calculateRecurringDays,
+  calculateEndTime,
+  calculateNextOccurrence
+} from './tools/scheduler.js';
 import logger from './utils/logger.js';
 
 /**
@@ -498,7 +505,34 @@ export async function handleMessage(params) {
 
     switch (name) {
       case 'calculateTime': {
-        const result = calculateTime(input);
+        // Normalize "now" to "now + 0m" for compatibility
+        const normalizedInput = {
+          ...input,
+          expression: input.expression.trim().toLowerCase() === 'now'
+            ? 'now + 0m'
+            : input.expression
+        };
+        const result = calculateTime(normalizedInput);
+        return JSON.stringify(result, null, 2);
+      }
+
+      case 'calculateTimeRange': {
+        const result = calculateTimeRange(input);
+        return JSON.stringify(result, null, 2);
+      }
+
+      case 'calculateRecurringDays': {
+        const result = calculateRecurringDays(input);
+        return JSON.stringify(result, null, 2);
+      }
+
+      case 'calculateEndTime': {
+        const result = calculateEndTime(input);
+        return JSON.stringify(result, null, 2);
+      }
+
+      case 'calculateNextOccurrence': {
+        const result = calculateNextOccurrence(input);
         return JSON.stringify(result, null, 2);
       }
 

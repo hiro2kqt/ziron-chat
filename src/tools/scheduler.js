@@ -37,7 +37,18 @@ export function getSchedulerTools() {
                   },
                   buttons: {
                     type: 'array',
-                    description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "!act:done:<<refId>>"}]])',
+                    description: 'Telegram inline keyboard rows',
+                    items: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          text: { type: 'string', description: 'Button label' },
+                          callback_data: { type: 'string', description: 'Callback data' }
+                        },
+                        required: ['text', 'callback_data']
+                      }
+                    }
                   }
                 },
         required: ['name', 'chatId', 'fireAt', 'message'],
@@ -79,7 +90,18 @@ export function getSchedulerTools() {
           },
           buttons: {
             type: 'array',
-            description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "done"}]])',
+            description: 'Telegram inline keyboard rows',
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  text: { type: 'string', description: 'Button label' },
+                  callback_data: { type: 'string', description: 'Callback data' }
+                },
+                required: ['text', 'callback_data']
+              }
+            },
           },
         },
         required: ['name', 'chatId', 'fromTime', 'toTime', 'intervalMinutes', 'message'],
@@ -125,15 +147,16 @@ export function getSchedulerTools() {
             },
             buttons: {
               type: 'array',
-              description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "!act:done:<<refId>>"}], [{text: "❌ Bỏ", callback_data: "!act:delete:<<refId>>"}]])',
+              description: 'Telegram inline keyboard rows',
               items: {
                 type: 'array',
                 items: {
                   type: 'object',
                   properties: {
-                    text: { type: 'string' },
-                    callback_data: { type: 'string' }
-                  }
+                    text: { type: 'string', description: 'Button label' },
+                    callback_data: { type: 'string', description: 'Callback data' }
+                  },
+                  required: ['text', 'callback_data']
                 }
               }
             }

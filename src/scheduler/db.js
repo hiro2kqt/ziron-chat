@@ -72,6 +72,10 @@ export function initDatabases() {
     )
   `);
 
+  // Add ref_id columns safely
+  try { jobsDb.exec("ALTER TABLE jobs ADD COLUMN ref_id TEXT;"); } catch (e) {}
+  try { todayDb.exec("ALTER TABLE today_jobs ADD COLUMN ref_id TEXT;"); } catch (e) {}
+
   // Set secure file permissions
   try {
     fs.chmodSync(JOBS_DB_PATH, 0o600);
@@ -102,6 +106,30 @@ export function getMasterJobs() {
     repeat_days: JSON.parse(row.repeat_days || '[]'),
     time_triggers: JSON.parse(row.time_triggers || '[]'),
   }));
+}
+
+/**
+ * Get a single enabled master job by ID
+ * @param {string} jobId - Job ID
+ * @returns {Object|null} Job object or null if not found
+ */
+export function getMasterJobById(jobId) {
+  if (!jobsDb) throw new Error('Database not initialized');
+
+  const stmt = jobsDb.prepare(`
+    SELECT * FROM jobs WHERE id = ? AND enabled = 1
+  `);
+
+  const row = stmt.get(jobId);
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    repeat_days: JSON.parse(row.repeat_days || '[]'),
+    time_triggers: JSON.parse(row.time_triggers || '[]'),
+  };
 }
 
 /**
@@ -140,8 +168,8 @@ export function insertMasterJob(job) {
   const now = new Date().toISOString();
 
   const stmt = jobsDb.prepare(`
-    INSERT INTO jobs (id, name, enabled, repeat_days, time_triggers, chat_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO jobs (id, name, enabled, repeat_days, time_triggers, chat_id, created_at, updated_at, ref_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -152,7 +180,8 @@ export function insertMasterJob(job) {
     JSON.stringify(job.time_triggers || []),
     String(job.chat_id),
     now,
-    now
+    now,
+    job.ref_id || null
   );
 
   logger.info(`[Scheduler] Master job created: ${job.name} (${id})`);
@@ -248,9 +277,9 @@ export function insertTodayJob(job) {
   const stmt = todayDb.prepare(`
     INSERT INTO today_jobs (
       id, job_id, name, chat_id, fire_at, message, buttons,
-      enabled, fired, source, date, created_at
+      enabled, fired, source, date, created_at, ref_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -265,7 +294,8 @@ export function insertTodayJob(job) {
     job.fired ? 1 : 0,
     job.source || 'recurring',
     job.date,
-    now
+    now,
+    job.ref_id || null
   );
 
   logger.debug(`[Scheduler] Today job created: ${job.name} at ${job.fire_at}`);
@@ -336,6 +366,27 @@ export function disableTodayJobsById(jobId, dateStr) {
 }
 
 /**
+ * Delete today jobs from a specific master job (recurring only)
+ * @param {string} jobId - Master job ID
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {number} Number of jobs deleted
+ */
+export function deleteTodayJobsByMasterId(jobId, dateStr) {
+  if (!todayDb) throw new Error('Database not initialized');
+
+  const stmt = todayDb.prepare(`
+    DELETE FROM today_jobs
+    WHERE job_id = ? AND source = 'recurring' AND date = ?
+  `);
+
+  const result = stmt.run(jobId, dateStr);
+
+  logger.debug(`[Scheduler] Deleted ${result.changes} recurring today jobs for master job: ${jobId}`);
+
+  return result.changes;
+}
+
+/**
  * Delete today jobs that have passed their active time
  * @param {string} thresholdTime - Threshold time in HH:mm or HH:mm:ss format
  * @param {string} dateStr - Date in YYYY-MM-DD format
@@ -373,7 +424,7 @@ export function deletePastTodayJobs(thresholdTime, dateStr) {
 export function insertOneShotJobs(params) {
   if (!todayDb) throw new Error('Database not initialized');
 
-  const { name, chatId, fromTime, toTime, intervalMinutes, message, buttons } = params;
+  const { name, chatId, fromTime, toTime, intervalMinutes, message, buttons, ref_id } = params;
 
   // Parse times
   const [fromHour, fromMin] = fromTime.split(':').map(Number);
@@ -423,6 +474,7 @@ export function insertOneShotJobs(params) {
       buttons,
       source: 'oneshot',
       date: today,
+      ref_id,
     });
     count++;
   }
@@ -430,6 +482,83 @@ export function insertOneShotJobs(params) {
   logger.info(`[Scheduler] Created ${count} oneshot jobs for interval ${fromTime}-${toTime}`);
 
   return count;
+}
+
+/**
+ * Delete today_jobs by ref_id for a specific date
+ * @param {string} refId - Reference ID
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {number} Number of jobs deleted
+ */
+export function deleteTodayJobsByRefId(refId, dateStr) {
+  if (!todayDb) throw new Error('Database not initialized');
+
+  const stmt = todayDb.prepare(`
+    DELETE FROM today_jobs
+    WHERE ref_id = ? AND date = ? AND fired = 0
+  `);
+
+  const result = stmt.run(refId, dateStr);
+
+  logger.info(`[Scheduler] Deleted ${result.changes} today jobs with ref_id: ${refId}`);
+
+  return result.changes;
+}
+
+/**
+ * Delete master jobs by ref_id
+ * @param {string} refId - Reference ID
+ * @returns {number} Number of jobs deleted
+ */
+export function deleteMasterJobsByRefId(refId) {
+  if (!jobsDb) throw new Error('Database not initialized');
+
+  const stmt = jobsDb.prepare('DELETE FROM jobs WHERE ref_id = ?');
+  const result = stmt.run(refId);
+
+  logger.info(`[Scheduler] Deleted ${result.changes} master jobs with ref_id: ${refId}`);
+
+  return result.changes;
+}
+
+/**
+ * Get a single today_job by ID
+ * @param {string} id - Today job ID
+ * @returns {Object|null} Today job or null if not found
+ */
+export function getTodayJobById(id) {
+  if (!todayDb) throw new Error('Database not initialized');
+
+  const stmt = todayDb.prepare('SELECT * FROM today_jobs WHERE id = ?');
+  const row = stmt.get(id);
+
+  if (!row) return null;
+
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    fired: Boolean(row.fired),
+    buttons: JSON.parse(row.buttons || '[]'),
+  };
+}
+
+/**
+ * Delete jobs and today_jobs by ref_id
+ * @param {string} refId - Reference ID
+ * @returns {Object} Number of deleted jobs from both tables
+ */
+export function deleteJobsByRefId(refId) {
+  if (!jobsDb || !todayDb) throw new Error('Databases not initialized');
+
+  const deleteJobsStmt = jobsDb.prepare('DELETE FROM jobs WHERE ref_id = ?');
+  const jobsResult = deleteJobsStmt.run(refId);
+
+  const deleteTodayStmt = todayDb.prepare('DELETE FROM today_jobs WHERE ref_id = ?');
+  const todayResult = deleteTodayStmt.run(refId);
+
+  logger.info(`[Scheduler] Deleted by ref_id ${refId}: ${jobsResult.changes} master, ${todayResult.changes} today`);
+
+  return { jobsDeleted: jobsResult.changes, todayJobsDeleted: todayResult.changes };
 }
 
 /**
@@ -451,7 +580,9 @@ export function closeDatabases() {
 export default {
   initDatabases,
   getMasterJobs,
+  getMasterJobById,
   getTodayJobs,
+  getTodayJobById,
   insertMasterJob,
   updateMasterJob,
   deleteMasterJob,
@@ -459,7 +590,11 @@ export default {
   markFired,
   disableTodayJobsByName,
   disableTodayJobsById,
+  deleteTodayJobsByMasterId,
+  deleteTodayJobsByRefId,
+  deleteMasterJobsByRefId,
   deletePastTodayJobs,
   insertOneShotJobs,
+  deleteJobsByRefId,
   closeDatabases,
 };

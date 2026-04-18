@@ -23,6 +23,10 @@ export function getSchedulerTools() {
             type: 'string',
             description: 'Chat ID where reminders will be sent (CRITICAL: MUST use the exact chatId provided in your context/instructions. DO NOT use words like "default", "user", etc.)',
           },
+          refId: {
+            type: 'string',
+            description: 'Unique string used to group related jobs',
+          },
           fireAt: {
             type: 'string',
             description: "Time in HH:MM format (CRITICAL: MUST BE IN UTC! Do NOT pass the user's local time)",
@@ -33,7 +37,7 @@ export function getSchedulerTools() {
                   },
                   buttons: {
                     type: 'array',
-                    description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "done"}]])',
+                    description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "!act:done:<<refId>>"}]])',
                   }
                 },
         required: ['name', 'chatId', 'fireAt', 'message'],
@@ -52,6 +56,10 @@ export function getSchedulerTools() {
           chatId: {
             type: 'string',
             description: 'Chat ID where reminders will be sent',
+          },
+          refId: {
+            type: 'string',
+            description: 'Unique string used to group related jobs',
           },
           fromTime: {
             type: 'string',
@@ -91,6 +99,10 @@ export function getSchedulerTools() {
             type: 'string',
             description: 'Chat ID where reminders will be sent',
           },
+          refId: {
+            type: 'string',
+            description: 'Unique string used to group related jobs',
+          },
           repeatDays: {
             type: 'array',
             items: {
@@ -113,7 +125,7 @@ export function getSchedulerTools() {
             },
             buttons: {
               type: 'array',
-              description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "done"}], [{text: "❌ Bỏ", callback_data: "cancel"}]])',
+              description: 'Array of inline button rows (e.g. [[{text: "✅ Xong", callback_data: "!act:done:<<refId>>"}], [{text: "❌ Bỏ", callback_data: "!act:delete:<<refId>>"}]])',
               items: {
                 type: 'array',
                 items: {

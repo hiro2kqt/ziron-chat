@@ -11,6 +11,7 @@ import { chat as openaiCodexChat } from '../providers/openai-codex.js';
 import { handleMessage, resetSession, getSessionId, initScheduler, addOneshotJob } from '../gateway.js';
 import { loadSession } from '../storage/history.js';
 import { handleCallback } from '../scheduler/callbacks.js';
+import { handleInlineAction } from '../channels/telegram/actions.js';
 import logger from '../utils/logger.js';
 
 export async function connectCommand() {
@@ -159,7 +160,12 @@ export async function connectCommand() {
 
     // Register callback query handler for scheduler buttons
     client.bot.on('callback_query:data', async (ctx) => {
+      const from = ctx.from.username || ctx.from.first_name;
+      logger.info(`[Telegram IN] Button clicked by ${from}: ${ctx.callbackQuery.data}`);
       try {
+        const handled = await handleInlineAction(ctx);
+        if (handled) return;
+
         await handleCallback(ctx, addOneshotJob);
       } catch (err) {
         logger.error('Callback error:', err);

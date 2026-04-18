@@ -83,11 +83,23 @@ export async function checkAndFire(sendMessage) {
       // Parse buttons from JSON
       const buttons = job.buttons || [];
 
-      // Replace {todayJobId} placeholder in button callback_data
-      const processedButtons = buttons.map(row =>
+      // Check if buttons is a valid 2D array, otherwise reset to empty array
+      const isValidFormat = Array.isArray(buttons) && (buttons.length === 0 || Array.isArray(buttons[0]));
+      // Check if it's a 1D array instead, and try to wrap it if so
+      let safeButtons = [];
+      if (isValidFormat) {
+        safeButtons = buttons;
+      } else if (Array.isArray(buttons) && buttons.length > 0 && typeof buttons[0] === 'object') {
+        safeButtons = [buttons]; // Wrap 1D array into 2D array
+      }
+
+      // Replace {todayJobId} and <<refId>> placeholder in button callback_data
+      const processedButtons = safeButtons.map(row =>
         row.map(btn => ({
           ...btn,
-          callback_data: btn.callback_data.replace(/{todayJobId}/g, job.id),
+          callback_data: btn.callback_data
+            .replace(/{todayJobId}/g, job.id)
+            .replace(/<<refId>>/g, job.ref_id || job.id),
         }))
       );
 

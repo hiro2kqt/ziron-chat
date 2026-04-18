@@ -300,11 +300,24 @@ export async function buildApiMessages(sessionId) {
     }
 
     if (msg.role === 'user') {
-      // Add user message
-      result.push({
-        role: 'user',
-        content: msg.content,
-      });
+      // Merge consecutive user messages
+      if (result.length > 0 && result[result.length - 1].role === 'user') {
+        const lastMsg = result[result.length - 1];
+        
+        // If last message is an array (e.g. contains tool_result)
+        if (Array.isArray(lastMsg.content)) {
+          lastMsg.content.push({ type: 'text', text: msg.content });
+        } else {
+          // Both are strings
+          lastMsg.content = lastMsg.content + '\n\n' + msg.content;
+        }
+      } else {
+        // Add new user message
+        result.push({
+          role: 'user',
+          content: msg.content,
+        });
+      }
     } else if (msg.role === 'assistant') {
       // Add assistant message
       result.push({
@@ -312,25 +325,30 @@ export async function buildApiMessages(sessionId) {
         content: msg.content,
       });
     } else if (msg.role === 'tool_use') {
-      // Append to preceding assistant message
-      if (result.length > 0 && result[result.length - 1].role === 'assistant') {
-        const lastMsg = result[result.length - 1];
-
-        // Ensure content is array
-        if (typeof lastMsg.content === 'string') {
-          lastMsg.content = [{ type: 'text', text: lastMsg.content }];
-        } else if (!Array.isArray(lastMsg.content)) {
-          lastMsg.content = [];
-        }
-
-        // Append tool_use block
-        lastMsg.content.push({
-          type: 'tool_use',
-          id: msg.id,
-          name: msg.toolName,
-          input: msg.content,
+      // Create preceding assistant message if missing
+      if (result.length === 0 || result[result.length - 1].role !== 'assistant') {
+        result.push({
+          role: 'assistant',
+          content: [], // Empty text
         });
       }
+
+      const lastMsg = result[result.length - 1];
+
+      // Ensure content is array
+      if (typeof lastMsg.content === 'string') {
+        lastMsg.content = [{ type: 'text', text: lastMsg.content }];
+      } else if (!Array.isArray(lastMsg.content)) {
+        lastMsg.content = [];
+      }
+
+      // Append tool_use block
+      lastMsg.content.push({
+        type: 'tool_use',
+        id: msg.toolUseId || msg.id,
+        name: msg.toolName,
+        input: msg.content,
+      });
     } else if (msg.role === 'tool_result') {
       // Create or merge into user message
       const toolResultBlock = {

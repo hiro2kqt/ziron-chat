@@ -127,6 +127,7 @@ export function createClient(botToken) {
      * @param {Object} options - Telegram send options (reply_markup, parse_mode, etc)
      */
     async sendMessage(chatId, text, options = {}) {
+      logger.info(`[Telegram OUT] Sending to ${chatId}: Payload:`, JSON.stringify(options.reply_markup || {}, null, 2));
       await bot.api.sendMessage(chatId, text, options);
     },
 

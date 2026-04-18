@@ -6,11 +6,83 @@
 import logger from '../utils/logger.js';
 import {
   getMasterJobs,
+  getMasterJobById,
   insertTodayJob,
-  disableTodayJobsByName,
+  disableTodayJobsById,
+  deleteTodayJobsByMasterId,
 } from './db.js';
 
 let syncTimeout = null;
+
+/**
+ * Get today's date string in UTC
+ * @returns {string} Date in YYYY-MM-DD format
+ */
+function getTodayDateStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Check if a master job should run today
+ * @param {Object} job - Master job object
+ * @returns {boolean} True if job should run today
+ */
+function shouldRunToday(job) {
+  const dayOfWeek = new Date().getUTCDay();
+  const repeatDays = job.repeat_days || [];
+  return repeatDays.length === 0 || repeatDays.includes(dayOfWeek);
+}
+
+/**
+ * Create today_jobs from a single master job
+ * @param {Object} job - Master job object
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @returns {number} Number of today_jobs created
+ */
+function createTodayJobsFromMaster(job, dateStr) {
+  const triggers = job.time_triggers || [];
+  let count = 0;
+
+  for (const trigger of triggers) {
+    // Check if buttons is a valid 2D array
+    const rawButtons = trigger.buttons || [];
+    const isValidFormat = Array.isArray(rawButtons) && (rawButtons.length === 0 || Array.isArray(rawButtons[0]));
+
+    let safeButtons = [];
+    if (isValidFormat) {
+      safeButtons = rawButtons;
+    } else if (Array.isArray(rawButtons) && rawButtons.length > 0 && typeof rawButtons[0] === 'object') {
+      safeButtons = [rawButtons]; // Wrap 1D into 2D
+    }
+
+    // Replace {jobId} and <<refId>> placeholder in button callback_data
+    const buttons = safeButtons.map(row =>
+      row.map(btn => ({
+        ...btn,
+        callback_data: btn.callback_data
+          .replace(/{jobId}/g, job.id)
+          .replace(/<<refId>>/g, job.ref_id || job.id),
+      }))
+    );
+
+    // Insert today_job
+    insertTodayJob({
+      job_id: job.id,
+      name: job.name,
+      chat_id: job.chat_id,
+      fire_at: trigger.time,
+      message: trigger.message,
+      buttons,
+      source: 'recurring',
+      date: dateStr,
+      ref_id: job.ref_id,
+    });
+
+    count++;
+  }
+
+  return count;
+}
 
 /**
  * Sync today's jobs from master jobs
@@ -19,67 +91,67 @@ let syncTimeout = null;
  */
 export async function syncTodayJobs() {
   try {
-    // Get current UTC date and day of week
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
-    const dayOfWeek = now.getUTCDay(); // 0 = Sunday, 1 = Monday, ...
+    const dateStr = getTodayDateStr();
+    const dayOfWeek = new Date().getUTCDay();
 
     logger.info(`[Scheduler] Syncing jobs for ${dateStr} (day ${dayOfWeek})`);
 
-    // Disable all existing recurring today_jobs for today
-    // This prevents duplicates when sync runs multiple times
     const allJobs = getMasterJobs();
-    for (const job of allJobs) {
-      for (const trigger of job.time_triggers || []) {
-        disableTodayJobsByName(job.name, dateStr);
-      }
-    }
-
-    // Get all enabled master jobs
-    const masterJobs = getMasterJobs();
     let syncedCount = 0;
 
-    for (const job of masterJobs) {
-      // Check if job should run today
-      const repeatDays = job.repeat_days || [];
-      const shouldRunToday = repeatDays.length === 0 || repeatDays.includes(dayOfWeek);
+    // Disable all existing recurring today_jobs for today
+    for (const job of allJobs) {
+      disableTodayJobsById(job.id, dateStr);
+    }
 
-      if (!shouldRunToday) {
+    // Re-create from master
+    for (const job of allJobs) {
+      if (shouldRunToday(job)) {
+        const count = createTodayJobsFromMaster(job, dateStr);
+        syncedCount += count;
+      } else {
         logger.debug(`[Scheduler] Skipping job ${job.name} (not scheduled for day ${dayOfWeek})`);
-        continue;
-      }
-
-      // Parse time triggers
-      const triggers = job.time_triggers || [];
-
-      for (const trigger of triggers) {
-        // Replace {jobId} placeholder in button callback_data
-        const buttons = (trigger.buttons || []).map(row =>
-          row.map(btn => ({
-            ...btn,
-            callback_data: btn.callback_data.replace(/{jobId}/g, job.id),
-          }))
-        );
-
-        // Insert today_job
-        insertTodayJob({
-          job_id: job.id,
-          name: job.name,
-          chat_id: job.chat_id,
-          fire_at: trigger.time,
-          message: trigger.message,
-          buttons,
-          source: 'recurring',
-          date: dateStr,
-        });
-
-        syncedCount++;
       }
     }
 
     logger.success(`[Scheduler] Synced ${syncedCount} jobs for today`);
   } catch (err) {
     logger.error('[Scheduler] Sync failed:', err.message);
+  }
+}
+
+/**
+ * Re-sync a single master job's today_jobs
+ * Deletes existing today_jobs and re-creates them if job should run today
+ * @param {string} jobId - Master job ID
+ * @returns {Promise<void>}
+ */
+export async function reSyncJob(jobId) {
+  try {
+    const dateStr = getTodayDateStr();
+
+    // 1. Delete existing today_jobs from this master job
+    deleteTodayJobsByMasterId(jobId, dateStr);
+
+    // 2. Load master job
+    const job = getMasterJobById(jobId);
+    if (!job) {
+      logger.debug(`[Scheduler] Job ${jobId} not found or disabled - skipping re-sync`);
+      return;
+    }
+
+    // 3. Check if should run today
+    if (!shouldRunToday(job)) {
+      logger.debug(`[Scheduler] Job ${job.name} should not run today - skipping`);
+      return;
+    }
+
+    // 4. Create new today_jobs
+    const count = createTodayJobsFromMaster(job, dateStr);
+
+    logger.info(`[Scheduler] Re-synced job: ${job.name} (${count} today_jobs created)`);
+  } catch (err) {
+    logger.error(`[Scheduler] Re-sync failed for job ${jobId}:`, err.message);
   }
 }
 
@@ -136,6 +208,7 @@ export function stopSync() {
 
 export default {
   syncTodayJobs,
+  reSyncJob,
   scheduleNextDaySync,
   stopSync,
 };

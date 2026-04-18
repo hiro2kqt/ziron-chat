@@ -310,72 +310,99 @@ BTC: $X,XXX (+X.X% / -X.X% today)
 export function getSchedulerSection() {
   return `# Scheduler
 
-You have a built-in scheduler. When Hiro asks to be reminded of something, you MUST use it — never just say "I'll remind you" without actually scheduling.
+You have a built-in scheduler. Always use it when Hiro asks to be reminded — never just acknowledge without actually scheduling.
 
-## Detecting scheduling intent
+## Detecting Intent
 
-Trigger on phrases like: nhắc tôi, remind me, đặt lịch, hàng ngày lúc, mỗi X phút, từ Xh đến Yh, hôm nay lúc
+Trigger phrases: nhắc tôi, remind me, đặt lịch, hàng ngày lúc, mỗi X phút, từ Xh đến Yh, hôm nay lúc
 
-## Parsing rules
+## Time Rules
 
-- IMPORTANT: All tools expect time in UTC! You must convert Hiro's local time to UTC before calling any scheduler tool.
-- Extract: name, time(s), message, repeat pattern
-- Times are always in HH:MM 24h format (UTC)
-- If no repeat → oneshot
-- If "mỗi ngày" / "every day" / specific days → recurring
-- If "từ Xh đến Yh mỗi Np" → interval, expand into multiple times (can be sub-minute using decimals e.g. 10 seconds = 0.167 minutes)
+- All tools expect UTC time — convert from Hiro's local time before calling
+- Format: HH:MM 24-hour
+- For intervals, use decimal minutes for sub-minute precision (e.g., 10 seconds = 0.167 minutes)
 
-## How to schedule (call these in your tool response)
+## Tool Calls
 
-**One-time today:**
+**One-time reminder:**
 \`\`\`javascript
-addOneshotJob({ name, chatId, fireAt: "HH:MM", message, buttons })
+addOneshotJob({ name, chatId, refId, fireAt: "HH:MM", message, buttons })
 \`\`\`
 
 **Recurring daily:**
 \`\`\`javascript
-addRecurringJob({ name, chatId, repeatDays: [], timeTriggers: [{ time, message }] })
+addRecurringJob({ name, chatId, refId, repeatDays: [], timeTriggers: [{ time, message }] })
 \`\`\`
 
 **Recurring specific days** (0=Sun, 1=Mon...):
 \`\`\`javascript
-addRecurringJob({ name, chatId, repeatDays: [1,3,5], timeTriggers: [...] })
+addRecurringJob({ name, chatId, refId, repeatDays: [1,3,5], timeTriggers: [...] })
 \`\`\`
 
-**Interval today** (expand to multiple oneshoots):
+**Interval (multiple reminders in a time range):**
 \`\`\`javascript
-addOneshotInterval({ name, chatId, fromTime, toTime, intervalMinutes, message })
+addOneshotInterval({ name, chatId, refId, fromTime, toTime, intervalMinutes, message })
 \`\`\`
 
-## Default buttons
+## Buttons
 
-Always include buttons when scheduling ANY reminder (addOneshotJob, addRecurringJob, addOneshotInterval):
+### When to include buttons:
+- **Interval reminders** (multiple fires in a period): ALWAYS include — user needs to cancel all at once
+- **Recurring daily/weekly jobs**: ALWAYS include — user needs done/skip/delete options
+- **Single oneshot reminder** (e.g. '1p nữa nhắc tôi đi mua bánh mì'): DO NOT include buttons. Pass buttons: [] or omit buttons entirely. Only add buttons if Hiro explicitly asks for them (e.g. 'thêm button', 'add a done button').
 
-You MUST pass this EXACT \`buttons\` array structure in your tool call (replace \`[job_name]\` with the actual job name, e.g. \`drink-water\`):
+❌ WRONG: "nhắc tôi lúc 3h họp zoom" → addOneshotJob({ ..., buttons: [[...]] })
+✅ RIGHT: "nhắc tôi lúc 3h họp zoom" → addOneshotJob({ ..., buttons: [] })
+✅ RIGHT: "nhắc tôi lúc 3h họp zoom, thêm button done" → addOneshotJob({ ..., buttons: [[{ text: "✅ Done", ... }]] })
+
+### When buttons are included, use this format:
+
+Replace with the actual refId value from the Environment section.
+
+Example: If refId in Environment is "c3dd92b2-df40-4997-a50d-d3a60a077068", then:
 \`\`\`json
 [
   [
-    { "text": "✅ Xong", "callback_data": "done:[job_name]" },
-    { "text": "⏰ +15p", "callback_data": "snooze:15:{todayJobId}" },
-    { "text": "❌ Bỏ", "callback_data": "skip_today_all:[job_name]" }
+    { "text": "✅ Xong", "callback_data": "!act:done:c3dd92b2-df40-4997-a50d-d3a60a077068" },
+    { "text": "💤 +15p", "callback_data": "!act:snooze:15:{todayJobId}" },
+    { "text": "❌ Huỷ", "callback_data": "!act:delete:c3dd92b2-df40-4997-a50d-d3a60a077068" }
   ]
 ]
 \`\`\`
-Note: Keep \`{todayJobId}\` exactly as it is written (the system will replace it automatically).
 
-## Confirming to Hiro
+Note: Keep \`{todayJobId}\` exactly as written — the system replaces it at fire time.
 
-After scheduling, always confirm with:
+### When no buttons needed:
+Pass \`buttons: []\` or omit the buttons parameter.
+
+## refId
+
+refId groups related jobs so they can be managed together.
+
+### When refId is needed:
+- **Interval jobs** (multiple oneshots from one request): YES — groups them for bulk cancel
+- **Recurring jobs**: YES — groups all daily instances
+- **Single oneshot**: Use the refId from Environment for consistency, but if no buttons are included, the refId won't appear in any callback anyway
+
+### Where to get refId:
+- NEVER generate your own UUID for refId. ALWAYS copy the exact refId string from the Environment section above. If Environment shows refId: 'abc-123', you MUST use 'abc-123' — not a new UUID.
+- If you need a SECOND refId for an unrelated job group in the same turn, append "-2" to the provided refId
+
+## Confirming
+
+After scheduling, tell Hiro:
 - What was scheduled
-- When it will fire (IMPORTANT: Convert the UTC time back to Hiro's local time for this confirmation)
-- How to cancel: "Bấm ❌ Bỏ hôm nay trên reminder hoặc nói 'hủy [tên job]'"
+- When it will fire (convert UTC back to local time)
+- How to cancel: "Bấm ❌ Huỷ trên reminder hoặc nói 'hủy [tên job]'"
 
-## Managing jobs
+## Managing Jobs
 
-CRITICAL RULE FOR CANCELLING/DELETING:
-1. FIRST, call "listTodayJobs(chatId)" or "listMasterJobs(chatId)" to get the list of active jobs.
-2. Look at the "name" or "id" fields in the returned JSON.
-3. SECOND, you MUST actually call the "disableJobsByName" or "deleteJob" tool using the EXACT string found. Do NOT just tell the user you cancelled it without calling the disable/delete tool!
+To cancel/delete, ALWAYS:
+1. Call \`listTodayJobs(chatId)\` or \`listMasterJobs(chatId)\` first
+2. Find the exact name or id from the returned JSON
+3. Call \`disableJobsByName(name, dateStr)\` or \`deleteJob(jobId)\` with the exact value
+
+Do NOT just tell Hiro it's cancelled without calling the tool.
 
 - **List today:** listTodayJobs(chatId)
 - **List all:** listMasterJobs(chatId)
@@ -441,7 +468,7 @@ export function getEnvironmentSection(context = {}) {
   if (currentDate) {
     section += `- Current system Date/Time (UTC): ${context.currentTimeUTC || currentDate}\n`;
   }
-  
+
   if (context.timezone) {
     section += `- User's System Configured Timezone: ${context.timezone}\n`;
   }
@@ -449,19 +476,19 @@ export function getEnvironmentSection(context = {}) {
   if (context.location) {
     section += `- User's System Configured Location: ${context.location}\n`;
   }
-  
+
   if (context.currentTimezoneContext) {
     section += `- Timezone Context: ${context.currentTimezoneContext}\n`;
   }
-  
+
   if (context.chatId) {
     section += `- Current User Chat ID: "${context.chatId}" (Use this exact string for all scheduling tool calls)\n`;
   }
 
-  // Location
-  if (location) {
-    section += `- Hiro's location: ${location}\n`;
+  if (context.refId) {
+    section += `- Current Ref ID: "${context.refId}" (CRITICAL: Use this exact refId for ANY job group you create in this conversation turn. This groups related jobs so they can be managed together. Generate a NEW refId ONLY if creating a SECOND unrelated job group in the same turn.)\n`;
   }
+
 
   // Available tools
   if (availableTools.length > 0) {

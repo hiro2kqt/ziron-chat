@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { randomUUID } from 'crypto';
 import { loadConfig } from './config/index.js';
 import { createSession, appendMessage, buildApiMessages } from './storage/history.js';
 import { createClient } from './api/client.js';
@@ -195,15 +196,7 @@ class OpenRouterProviderAdapter {
           const textBlocks = msg.content.filter(b => b.type === 'text');
           const toolResultBlocks = msg.content.filter(b => b.type === 'tool_result');
 
-          // Add text content as user message if present
-          if (textBlocks.length > 0) {
-            result.push({
-              role: 'user',
-              content: textBlocks.map(b => b.text).join('\n'),
-            });
-          }
-
-          // Add tool results as tool messages
+          // Add tool results as tool messages FIRST
           for (const toolResult of toolResultBlocks) {
             result.push({
               role: 'tool',
@@ -211,6 +204,14 @@ class OpenRouterProviderAdapter {
               content: typeof toolResult.content === 'string'
                 ? toolResult.content
                 : JSON.stringify(toolResult.content),
+            });
+          }
+
+          // Add text content as user message AFTER tool results
+          if (textBlocks.length > 0) {
+            result.push({
+              role: 'user',
+              content: textBlocks.map(b => b.text).join('\n'),
             });
           }
         } else {
@@ -290,6 +291,28 @@ class OpenRouterProviderAdapter {
       payload.tools = this.convertToolsToOpenAI(tools);
     }
 
+    // Log LLM interaction deeply if asked
+    logger.info(`[LLM OUT] Gửi yêu cầu lên OpenRouter (${this.model})...`);
+    logger.info(`[LLM OUT] System Prompt dài ${system.length} kí tự.`);
+    logger.info(`[LLM OUT] Tin nhắn gửi lên:`, JSON.stringify(convertedMessages, null, 2));
+
+    // Dump prompt so user can debug
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `prompt_${timestamp}.json`;
+      const debugPath = join(homedir(), '.ziron', 'prompts');
+      
+      // Ensure directory exists
+      if (!existsSync(debugPath)) {
+        mkdirSync(debugPath, { recursive: true });
+      }
+      
+      writeFileSync(join(debugPath, filename), JSON.stringify(payload, null, 2));
+      logger.info(`[Gateway] Đã lưu full payload vào file: ${join(debugPath, filename)}`);
+    } catch (e) {
+      // Ignore
+    }
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -317,16 +340,20 @@ class OpenRouterProviderAdapter {
 
     // Check if tool calls are present
     if (message.tool_calls && message.tool_calls.length > 0) {
+      logger.info(`[LLM IN] OpenRouter phản hồi có gọi Tool(s)!`);
       // Convert OpenAI tool_calls format to Anthropic tool_use format
       const content = [];
 
       // Add text content if present
       if (message.content) {
+        logger.info(`[LLM IN] Kèm text: ${message.content}`);
         content.push({ type: 'text', text: message.content });
       }
 
       // Add tool_use blocks
       for (const toolCall of message.tool_calls) {
+        logger.info(`[LLM IN] Tool gọi: ${toolCall.function.name}`);
+        logger.info(`[LLM IN] Data truyền vào:`, toolCall.function.arguments);
         content.push({
           type: 'tool_use',
           id: toolCall.id,
@@ -343,6 +370,7 @@ class OpenRouterProviderAdapter {
 
     // No tool calls, return text content
     const messageContent = message.content || '';
+    logger.info(`[LLM IN] OpenRouter trả lời: ${messageContent.substring(0, 100)}...`);
 
     return {
       content: [{ type: 'text', text: messageContent }],
@@ -443,6 +471,9 @@ export async function handleMessage(params) {
   // Get or create session for this channel
   const sessionId = getOrCreateSession(channelType, channelId);
 
+  // Generate a refId for this conversation turn (used to group related jobs)
+  const refId = randomUUID();
+
   // Build dynamic system prompt with context
   const systemPrompt = await buildSystemPrompt({
     context: {
@@ -453,6 +484,7 @@ export async function handleMessage(params) {
       timezone: gatewayState.config?.user?.timezone || '',
       availableTools: ['scheduler'],
       chatId: channelId,
+      refId,
     },
     // includeMemory: true is default
   });

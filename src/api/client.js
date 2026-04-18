@@ -75,68 +75,68 @@ export class ZironClient {
 
       // Step 4: Handle tool use
       if (response.stop_reason === 'tool_use') {
-        // Find tool_use block
-        const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
-
-        if (!toolUseBlock) {
+        const toolUseBlocks = response.content.filter((block) => block.type === 'tool_use');
+        
+        if (toolUseBlocks.length === 0) {
           throw new Error('LLM returned tool_use stop reason but no tool_use block found');
         }
 
         if (!onToolCall) {
-          throw new Error(
-            `LLM wants to call tool "${toolUseBlock.name}" but no onToolCall handler provided`
-          );
+          throw new Error(`LLM wants to call tools but no onToolCall handler provided`);
         }
 
-        // Append assistant message with tool_use (if there's text content too)
+        // Always append assistant message first
         const textBlocks = response.content.filter((block) => block.type === 'text');
-        if (textBlocks.length > 0) {
-          await appendMessage(sessionId, {
-            sessionId,
-            parentId: null,
-            role: 'assistant',
-            content: response.content,
-            toolName: null,
-            toolUseId: null,
-            isError: false,
-            isCompactBoundary: false,
-          });
-        }
-
-        // Append tool_use message
+        const textContent = textBlocks.map((block) => block.text).join('\n\n');
+        
         await appendMessage(sessionId, {
           sessionId,
           parentId: null,
-          role: 'tool_use',
-          content: toolUseBlock.input,
-          toolName: toolUseBlock.name,
+          role: 'assistant',
+          content: textContent || '', // Empty string if no text
+          toolName: null,
           toolUseId: null,
           isError: false,
           isCompactBoundary: false,
         });
 
-        // Execute tool
-        let toolResult;
-        let toolError = false;
+        // Process all tool calls concurrently or sequentially
+        for (const toolBlock of toolUseBlocks) {
+          // Append tool_use message
+          await appendMessage(sessionId, {
+            sessionId,
+            parentId: null,
+            role: 'tool_use',
+            content: toolBlock.input,
+            toolName: toolBlock.name,
+            toolUseId: toolBlock.id,
+            isError: false,
+            isCompactBoundary: false,
+          });
 
-        try {
-          toolResult = await onToolCall(toolUseBlock.name, toolUseBlock.input);
-        } catch (err) {
-          toolResult = `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`;
-          toolError = true;
+          // Execute tool
+          let toolResult;
+          let toolError = false;
+
+          try {
+            toolResult = await onToolCall(toolBlock.name, toolBlock.input);
+          } catch (err) {
+            toolResult = `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`;
+            toolError = true;
+          }
+
+          // Append tool_result message
+          await appendMessage(sessionId, {
+            sessionId,
+            parentId: null,
+            role: 'tool_result',
+            content: toolResult,
+            toolName: null,
+            toolUseId: toolBlock.id,
+            isError: toolError,
+            isCompactBoundary: false,
+          });
         }
-
-        // Append tool_result message
-        await appendMessage(sessionId, {
-          sessionId,
-          parentId: null,
-          role: 'tool_result',
-          content: toolResult,
-          toolName: null,
-          toolUseId: toolUseBlock.id,
-          isError: toolError,
-          isCompactBoundary: false,
-        });
 
         // Continue loop to get next response
         continue;

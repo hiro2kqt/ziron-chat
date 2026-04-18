@@ -22,7 +22,7 @@ import {
   listMasterJobs,
   deleteJob,
 } from './scheduler/index.js';
-import { getSchedulerTools } from './tools/scheduler.js';
+import { getSchedulerTools, calculateTime } from './tools/scheduler.js';
 import logger from './utils/logger.js';
 
 /**
@@ -497,6 +497,11 @@ export async function handleMessage(params) {
     logger.info(`[Tool] ${name} called with:`, JSON.stringify(input));
 
     switch (name) {
+      case 'calculateTime': {
+        const result = calculateTime(input);
+        return JSON.stringify(result, null, 2);
+      }
+
       case 'addOneshotJob': {
         const job = await addOneshotJob(input);
         return `Oneshot job created: ${job.name} at ${job.fire_at}`;

@@ -386,7 +386,7 @@ refId groups related jobs so they can be managed together.
 
 ### Where to get refId:
 - NEVER generate your own UUID for refId. ALWAYS copy the exact refId string from the Environment section above. If Environment shows refId: 'abc-123', you MUST use 'abc-123' — not a new UUID.
-- If you need a SECOND refId for an unrelated job group in the same turn, append "-2" to the provided refId
+- ALWAYS use the exact refId from Environment section as-is. Never append -2, -3, or any suffix. Never reuse refId from previous conversation turns. Each turn has its own refId — use it exactly as provided.
 
 ## Confirming
 

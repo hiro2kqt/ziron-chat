@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment
+.env
+.env.local
+
+# Runtime data
+*.log
+logs/
+sessions/
+*.session
+
+# Config
+config.local.yaml
+credentials.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.code-review-graph
+examples
+documents
+config.json

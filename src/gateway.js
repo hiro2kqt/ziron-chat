@@ -1,0 +1,594 @@
+/**
+ * Ziron Gateway
+ * Core gateway that manages conversations, history, and LLM providers
+ */
+
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+import { loadConfig } from './config/index.js';
+import { createSession, appendMessage, buildApiMessages } from './storage/history.js';
+import { createClient } from './api/client.js';
+import { buildSystemPrompt } from './prompts/system.js';
+import { shouldExtractMemory, extractMemory } from './memory/extractor.js';
+import {
+  initScheduler,
+  addRecurringJob,
+  addOneshotJob,
+  addOneshotInterval,
+  disableJobsByName,
+  listTodayJobs,
+  listMasterJobs,
+  deleteJob,
+} from './scheduler/index.js';
+import { getSchedulerTools } from './tools/scheduler.js';
+import logger from './utils/logger.js';
+
+/**
+ * @typedef {Object} HandleMessageParams
+ * @property {'telegram'|'cli'} channelType - Channel type
+ * @property {string|number} channelId - Channel-specific ID (chat ID for Telegram)
+ * @property {string} userMessage - User's message text
+ */
+
+/**
+ * Gateway state
+ */
+let gatewayState = {
+  initialized: false,
+  config: null,
+  client: null,
+  provider: null, // LLM provider instance for memory extraction
+  sessionMap: new Map(), // channelKey -> sessionId
+  sessionMapPath: null,
+  messageCounters: new Map(), // sessionId -> message count
+};
+
+/**
+ * Resolve session map file path
+ * @returns {string}
+ */
+function resolveSessionMapPath() {
+  return join(homedir(), '.ziron', 'sessions', 'session-map.json');
+}
+
+/**
+ * Ensure sessions directory exists
+ */
+function ensureSessionsDir() {
+  const dir = join(homedir(), '.ziron', 'sessions');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+}
+
+/**
+ * Load session map from disk
+ * @returns {Map<string, string>}
+ */
+function loadSessionMap() {
+  const sessionMapPath = resolveSessionMapPath();
+
+  if (!existsSync(sessionMapPath)) {
+    return new Map();
+  }
+
+  try {
+    const content = readFileSync(sessionMapPath, 'utf8');
+    const data = JSON.parse(content);
+    return new Map(Object.entries(data));
+  } catch (err) {
+    logger.warn('Failed to load session map, starting fresh:', err.message);
+    return new Map();
+  }
+}
+
+/**
+ * Save session map to disk
+ * @param {Map<string, string>} sessionMap
+ */
+function saveSessionMap(sessionMap) {
+  ensureSessionsDir();
+
+  const sessionMapPath = resolveSessionMapPath();
+  const data = Object.fromEntries(sessionMap);
+  const json = JSON.stringify(data, null, 2);
+
+  try {
+    writeFileSync(sessionMapPath, json, { encoding: 'utf8', mode: 0o600 });
+  } catch (err) {
+    logger.error('Failed to save session map:', err.message);
+  }
+}
+
+/**
+ * Create channel key for session mapping
+ * @param {'telegram'|'cli'} channelType
+ * @param {string|number} channelId
+ * @returns {string}
+ */
+function createChannelKey(channelType, channelId) {
+  return `${channelType}:${channelId}`;
+}
+
+/**
+ * Get or create session for a channel
+ * @param {'telegram'|'cli'} channelType
+ * @param {string|number} channelId
+ * @returns {string} Session ID
+ */
+function getOrCreateSession(channelType, channelId) {
+  const channelKey = createChannelKey(channelType, channelId);
+
+  // Check if session already exists
+  if (gatewayState.sessionMap.has(channelKey)) {
+    return gatewayState.sessionMap.get(channelKey);
+  }
+
+  // Create new session
+  const sessionId = createSession();
+  gatewayState.sessionMap.set(channelKey, sessionId);
+
+  // Persist to disk immediately
+  saveSessionMap(gatewayState.sessionMap);
+
+  logger.debug(`Created new session: ${channelKey} -> ${sessionId}`);
+
+  return sessionId;
+}
+
+/**
+ * Increment message counter for a session
+ * Used to track when to trigger memory extraction
+ * @param {string} sessionId - Session ID
+ * @returns {number} New message count
+ */
+function incrementSessionMessageCount(sessionId) {
+  const current = gatewayState.messageCounters.get(sessionId) || 0;
+  const newCount = current + 1;
+  gatewayState.messageCounters.set(sessionId, newCount);
+  return newCount;
+}
+
+/**
+ * OpenRouter provider adapter for ZironClient
+ * Adapts existing OpenRouter API to LLMProvider interface
+ */
+class OpenRouterProviderAdapter {
+  constructor(apiKey, model, maxTokens) {
+    this.apiKey = apiKey;
+    this.model = model || 'anthropic/claude-3.5-sonnet';
+    this.maxTokens = maxTokens || 4096;
+  }
+
+  /**
+   * Convert Anthropic tool format to OpenAI format
+   * @param {Array} anthropicTools - Tools in Anthropic format
+   * @returns {Array} Tools in OpenAI format
+   */
+  convertToolsToOpenAI(anthropicTools) {
+    return anthropicTools.map(tool => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema,
+      },
+    }));
+  }
+
+  /**
+   * Convert Anthropic-style messages to OpenAI format
+   * @param {Array} anthropicMessages - Messages in Anthropic format
+   * @returns {Array} Messages in OpenAI format
+   */
+  convertMessagesToOpenAI(anthropicMessages) {
+    const result = [];
+
+    for (const msg of anthropicMessages) {
+      if (msg.role === 'system') {
+        // System message: pass through
+        result.push(msg);
+      } else if (msg.role === 'user') {
+        // User message: check for tool_result blocks
+        if (Array.isArray(msg.content)) {
+          const textBlocks = msg.content.filter(b => b.type === 'text');
+          const toolResultBlocks = msg.content.filter(b => b.type === 'tool_result');
+
+          // Add text content as user message if present
+          if (textBlocks.length > 0) {
+            result.push({
+              role: 'user',
+              content: textBlocks.map(b => b.text).join('\n'),
+            });
+          }
+
+          // Add tool results as tool messages
+          for (const toolResult of toolResultBlocks) {
+            result.push({
+              role: 'tool',
+              tool_call_id: toolResult.tool_use_id,
+              content: typeof toolResult.content === 'string'
+                ? toolResult.content
+                : JSON.stringify(toolResult.content),
+            });
+          }
+        } else {
+          // String content
+          result.push(msg);
+        }
+      } else if (msg.role === 'assistant') {
+        // Assistant message: extract tool_use blocks
+        if (Array.isArray(msg.content)) {
+          const textBlocks = msg.content.filter(b => b.type === 'text');
+          const toolUseBlocks = msg.content.filter(b => b.type === 'tool_use');
+
+          if (toolUseBlocks.length > 0) {
+            // Has tool calls
+            const textContent = textBlocks.map(b => b.text).join('\n') || null;
+            const tool_calls = toolUseBlocks.map(b => ({
+              id: b.id,
+              type: 'function',
+              function: {
+                name: b.name,
+                arguments: JSON.stringify(b.input),
+              },
+            }));
+
+            result.push({
+              role: 'assistant',
+              content: textContent,
+              tool_calls,
+            });
+          } else {
+            // No tool calls, just text
+            result.push({
+              role: 'assistant',
+              content: textBlocks.map(b => b.text).join('\n'),
+            });
+          }
+        } else {
+          // String content
+          result.push(msg);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Chat method required by LLMProvider interface
+   * @param {Object} params
+   * @param {string} params.system - System prompt
+   * @param {Array} params.messages - API messages (Anthropic format)
+   * @param {Array} [params.tools] - Tool definitions (Anthropic format)
+   * @param {number} [params.max_tokens] - Max tokens override
+   * @returns {Promise<Object>} LLMResponse
+   */
+  async chat(params) {
+    const { system, messages, tools, max_tokens } = params;
+
+    // Convert Anthropic-style messages to OpenAI format
+    const convertedMessages = this.convertMessagesToOpenAI(messages);
+
+    // Combine system + messages
+    const openrouterMessages = [
+      { role: 'system', content: system },
+      ...convertedMessages,
+    ];
+
+    const payload = {
+      model: this.model,
+      messages: openrouterMessages,
+      max_tokens: max_tokens || this.maxTokens,
+      temperature: 1.0,
+    };
+
+    // Convert and add tools if provided (OpenRouter uses OpenAI format)
+    if (tools && tools.length > 0) {
+      payload.tools = this.convertToolsToOpenAI(tools);
+    }
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/yourusername/ziron',
+        'X-Title': 'Ziron',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.choices || !data.choices[0]) {
+      throw new Error('Invalid API response: no choices');
+    }
+
+    const message = data.choices[0].message;
+    const finishReason = data.choices[0].finish_reason;
+
+    // Check if tool calls are present
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      // Convert OpenAI tool_calls format to Anthropic tool_use format
+      const content = [];
+
+      // Add text content if present
+      if (message.content) {
+        content.push({ type: 'text', text: message.content });
+      }
+
+      // Add tool_use blocks
+      for (const toolCall of message.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: toolCall.id,
+          name: toolCall.function.name,
+          input: JSON.parse(toolCall.function.arguments),
+        });
+      }
+
+      return {
+        content,
+        stop_reason: 'tool_use',
+      };
+    }
+
+    // No tool calls, return text content
+    const messageContent = message.content || '';
+
+    return {
+      content: [{ type: 'text', text: messageContent }],
+      stop_reason: finishReason === 'stop' ? 'end_turn' : finishReason,
+    };
+  }
+}
+
+/**
+ * Initialize the gateway
+ * Must be called once on startup before handling any messages
+ * @returns {Promise<void>}
+ */
+export async function initializeGateway() {
+  if (gatewayState.initialized) {
+    logger.warn('Gateway already initialized');
+    return;
+  }
+
+  logger.info('🚀 Initializing gateway...');
+
+  // Load config
+  const config = loadConfig();
+  gatewayState.config = config;
+
+  // Load session map from disk
+  gatewayState.sessionMap = loadSessionMap();
+  gatewayState.sessionMapPath = resolveSessionMapPath();
+
+  const sessionCount = gatewayState.sessionMap.size;
+  if (sessionCount > 0) {
+    logger.info(`Loaded ${sessionCount} existing sessions`);
+  }
+
+  // Check which provider is configured
+  const hasOpenRouter = config.providers.openrouter.apiKey;
+  const hasOpenAIKey = config.providers.openai.apiKey;
+  const hasOpenAIOAuth = config.providers.openai.oauth.accessToken;
+
+  if (!hasOpenRouter && !hasOpenAIKey && !hasOpenAIOAuth) {
+    logger.warn('No AI provider configured - messages will fail');
+    logger.info('Configure a provider:');
+    logger.info('  - OpenRouter: Add OPENROUTER_API_KEY to .env');
+    logger.info('  - OpenAI: Add OPENAI_API_KEY to .env or run: ziron auth openai-oauth');
+    return;
+  }
+
+  // For now, only support OpenRouter
+  // TODO: Add OpenAI provider adapters
+  if (!hasOpenRouter) {
+    logger.warn('Only OpenRouter provider is currently supported by gateway');
+    logger.info('Please configure OpenRouter: OPENROUTER_API_KEY=your_key');
+    return;
+  }
+
+  // Create provider instance
+  const provider = new OpenRouterProviderAdapter(
+    config.providers.openrouter.apiKey,
+    config.providers.openrouter.model,
+    config.providers.openrouter.maxTokens
+  );
+
+  // Store provider for memory extraction
+  gatewayState.provider = provider;
+
+  // Create ZironClient
+  gatewayState.client = createClient(provider);
+
+  gatewayState.initialized = true;
+  logger.success('Gateway initialized with OpenRouter provider');
+}
+
+/**
+ * Handle incoming message from any channel
+ * Routes message to appropriate session and returns LLM response
+ *
+ * @param {HandleMessageParams} params - Message parameters
+ * @returns {Promise<string>} LLM response text
+ *
+ * @example
+ * const response = await handleMessage({
+ *   channelType: 'telegram',
+ *   channelId: 123456789,
+ *   userMessage: 'Hello!'
+ * });
+ */
+export async function handleMessage(params) {
+  if (!gatewayState.initialized) {
+    throw new Error('Gateway not initialized. Call initializeGateway() first.');
+  }
+
+  if (!gatewayState.client) {
+    throw new Error('No AI provider configured');
+  }
+
+  const { channelType, channelId, userMessage } = params;
+
+  // Get or create session for this channel
+  const sessionId = getOrCreateSession(channelType, channelId);
+
+  // Build dynamic system prompt with context
+  const systemPrompt = await buildSystemPrompt({
+    context: {
+      currentDate: new Date().toISOString(), // UTC time
+      currentTimeUTC: new Date().toUTCString(), // Explicit UTC time string
+      currentTimezoneContext: "CRITICAL TIMEZONE RULE: 1. You MUST know the user's explicit timezone offset (like UTC+7, EST, etc). 2. Look for it in the 'User's System Configured Timezone' above, OR in 'Personalization and Context' OR recent messages. 3. If you CANNOT find their explicit timezone offset, DO NOT CALL SCHEDULING TOOLS. Instead, reply: 'Vui lòng cho tôi biết múi giờ của bạn (VD: GMT+7)'. 4. Once you have the timezone offset, calculate the exact UTC time to pass to the tool. Example: User in GMT+7 asks for 14:00 -> Pass 07:00 UTC to tool.",
+      location: gatewayState.config?.user?.location || '',
+      timezone: gatewayState.config?.user?.timezone || '',
+      availableTools: ['scheduler'],
+      chatId: channelId,
+    },
+    // includeMemory: true is default
+  });
+
+  // Get scheduler tools
+  const tools = getSchedulerTools();
+
+  // Tool call handler
+  const onToolCall = async (name, input) => {
+    logger.info(`[Tool] ${name} called with:`, JSON.stringify(input));
+
+    switch (name) {
+      case 'addOneshotJob': {
+        const job = await addOneshotJob(input);
+        return `Oneshot job created: ${job.name} at ${job.fire_at}`;
+      }
+
+      case 'addOneshotInterval': {
+        const count = await addOneshotInterval(input);
+        return `Oneshot interval created: ${count} jobs scheduled`;
+      }
+
+      case 'addRecurringJob': {
+        const job = await addRecurringJob(input);
+        return `Recurring job created: ${job.name}`;
+      }
+
+      case 'listTodayJobs': {
+        const jobs = await listTodayJobs(input.chatId);
+        return JSON.stringify(jobs, null, 2);
+      }
+
+      case 'disableJobsByName': {
+        const count = await disableJobsByName(input.name, input.dateStr);
+        return `Disabled ${count} jobs`;
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  };
+
+  // Use ZironClient to handle the conversation
+  const response = await gatewayState.client.run({
+    sessionId,
+    userMessage,
+    systemPrompt,
+    tools,
+    onToolCall,
+  });
+
+  // Memory extraction (background, non-blocking)
+  const messageCount = incrementSessionMessageCount(sessionId);
+  if (shouldExtractMemory(messageCount)) {
+    logger.info(`[Memory] Extraction triggered for session ${sessionId.substring(0, 8)}... (message ${messageCount})`);
+
+    // Run in background - do not await
+    extractMemory(sessionId, gatewayState.provider)
+      .then(() => {
+        logger.success('[Memory] Extraction complete');
+      })
+      .catch(err => {
+        logger.error('[Memory] Extraction failed:', err.message);
+      });
+  }
+
+  return response;
+}
+
+/**
+ * Get gateway status
+ * @returns {Object} Status information
+ */
+export function getGatewayStatus() {
+  return {
+    initialized: gatewayState.initialized,
+    sessionCount: gatewayState.sessionMap.size,
+    hasProvider: gatewayState.client !== null,
+    sessionMapPath: gatewayState.sessionMapPath,
+  };
+}
+
+/**
+ * Reset session for a channel (start new conversation)
+ * @param {'telegram'|'cli'} channelType
+ * @param {string|number} channelId
+ * @returns {string} New session ID
+ */
+export function resetSession(channelType, channelId) {
+  const channelKey = createChannelKey(channelType, channelId);
+
+  // Get old session ID to clear counter
+  const oldSessionId = gatewayState.sessionMap.get(channelKey);
+  if (oldSessionId) {
+    gatewayState.messageCounters.delete(oldSessionId);
+  }
+
+  // Create new session
+  const sessionId = createSession();
+  gatewayState.sessionMap.set(channelKey, sessionId);
+
+  // Persist to disk
+  saveSessionMap(gatewayState.sessionMap);
+
+  logger.info(`Reset session: ${channelKey} -> ${sessionId}`);
+
+  return sessionId;
+}
+
+/**
+ * Get session ID for a channel (without creating new one)
+ * @param {'telegram'|'cli'} channelType
+ * @param {string|number} channelId
+ * @returns {string|null} Session ID or null if not found
+ */
+export function getSessionId(channelType, channelId) {
+  const channelKey = createChannelKey(channelType, channelId);
+  return gatewayState.sessionMap.get(channelKey) || null;
+}
+
+// Re-export scheduler functions for use by Telegram handler
+export {
+  initScheduler,
+  addRecurringJob,
+  addOneshotJob,
+  addOneshotInterval,
+  disableJobsByName,
+  listTodayJobs,
+  listMasterJobs,
+  deleteJob,
+};
+
+export default {
+  initializeGateway,
+  handleMessage,
+  getGatewayStatus,
+  resetSession,
+  getSessionId,
+};

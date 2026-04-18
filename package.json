@@ -1,0 +1,34 @@
+{
+  "name": "ziron",
+  "version": "0.2.0",
+  "description": "Minimal AI assistant - Telegram + OpenRouter",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "ziron": "./ziron.mjs"
+  },
+  "scripts": {
+    "start": "node ziron.mjs",
+    "dev": "node --watch ziron.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "ai",
+    "telegram",
+    "openrouter",
+    "assistant"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.8.2",
+    "better-sqlite3": "^12.9.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.42.0",
+    "yaml": "^2.5.1"
+  }
+}

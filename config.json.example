@@ -1,0 +1,21 @@
+{
+  "version": "0.1.0",
+  "providers": {
+    "openrouter": {
+      "apiKey": "",
+      "model": "",
+      "maxTokens": 500
+    }
+  },
+  "telegram": {
+    "botToken": ""
+  },
+  "settings": {
+    "logLevel": "info"
+  },
+  "user": {
+    "timezone": "",
+    "location": "",
+    "name": ""
+  }
+}

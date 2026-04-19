@@ -4,6 +4,9 @@
  */
 
 import logger from '../utils/logger.js';
+import fs from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import {
   getMasterJobs,
   getMasterJobById,
@@ -13,6 +16,25 @@ import {
 } from './db.js';
 
 let syncTimeout = null;
+
+const SYNC_STATE_PATH = join(homedir(), '.ziron', 'scheduler', 'sync-state.json');
+
+function loadSyncState() {
+  try {
+    const raw = fs.readFileSync(SYNC_STATE_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return { lastSyncedDate: null };
+  }
+}
+
+function saveSyncState(state) {
+  try {
+    fs.writeFileSync(SYNC_STATE_PATH, JSON.stringify(state, null, 2), { mode: 0o600 });
+  } catch (err) {
+    logger.error('[Scheduler] Failed to save sync state:', err.message);
+  }
+}
 
 /**
  * Get today's date string in UTC
@@ -92,6 +114,14 @@ function createTodayJobsFromMaster(job, dateStr) {
 export async function syncTodayJobs() {
   try {
     const dateStr = getTodayDateStr();
+
+    // Check if already synced today
+    const state = loadSyncState();
+    if (state.lastSyncedDate === dateStr) {
+      logger.info(`[Scheduler] Already synced for ${dateStr}, skipping`);
+      return;
+    }
+
     const dayOfWeek = new Date().getUTCDay();
 
     logger.info(`[Scheduler] Syncing jobs for ${dateStr} (day ${dayOfWeek})`);
@@ -115,6 +145,10 @@ export async function syncTodayJobs() {
     }
 
     logger.success(`[Scheduler] Synced ${syncedCount} jobs for today`);
+    
+    // Save sync state after successful sync
+    saveSyncState({ lastSyncedDate: dateStr });
+    logger.info(`[Scheduler] Sync state saved for ${dateStr}`);
   } catch (err) {
     logger.error('[Scheduler] Sync failed:', err.message);
   }
@@ -188,7 +222,7 @@ export function scheduleNextDaySync() {
   logger.info(`[Scheduler] Next sync in ${Math.round(msUntilMidnight / 1000 / 60)} minutes`);
 
   syncTimeout = setTimeout(async () => {
-    logger.info('[Scheduler] UTC midnight - running daily sync');
+    logger.info(`[Scheduler] Midnight sync triggered at ${new Date().toISOString()}`);
     await syncTodayJobs();
     scheduleNextDaySync(); // Schedule next day's sync
   }, msUntilMidnight);

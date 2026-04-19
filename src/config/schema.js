@@ -34,6 +34,11 @@ export const DEFAULT_CONFIG = {
     location: '',
     name: 'Hiro',
   },
+  tools: {
+    weather: {
+      googleApiKey: '',
+    },
+  },
 };
 
 /**
@@ -98,6 +103,14 @@ export function mergeWithDefaults(config) {
     user: {
       ...DEFAULT_CONFIG.user,
       ...(config.user || {}),
+    },
+    tools: {
+      ...DEFAULT_CONFIG.tools,
+      ...(config.tools || {}),
+      weather: {
+        ...DEFAULT_CONFIG.tools?.weather,
+        ...(config.tools?.weather || {}),
+      },
     },
   };
 }

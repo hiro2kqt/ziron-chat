@@ -98,6 +98,7 @@ function createTodayJobsFromMaster(job, dateStr) {
       source: 'recurring',
       date: dateStr,
       ref_id: job.ref_id,
+      action: trigger.action || null,
     });
 
     count++;

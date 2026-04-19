@@ -76,6 +76,9 @@ export function initDatabases() {
   try { jobsDb.exec("ALTER TABLE jobs ADD COLUMN ref_id TEXT;"); } catch (e) {}
   try { todayDb.exec("ALTER TABLE today_jobs ADD COLUMN ref_id TEXT;"); } catch (e) {}
 
+  // Add action column for tool_call actions (stores JSON)
+  try { todayDb.exec("ALTER TABLE today_jobs ADD COLUMN action TEXT;"); } catch (e) {}
+
   // Set secure file permissions
   try {
     fs.chmodSync(JOBS_DB_PATH, 0o600);
@@ -153,6 +156,7 @@ export function getTodayJobs(dateStr) {
     enabled: Boolean(row.enabled),
     fired: Boolean(row.fired),
     buttons: JSON.parse(row.buttons || '[]'),
+    action: row.action ? JSON.parse(row.action) : null,
   }));
 }
 
@@ -277,9 +281,9 @@ export function insertTodayJob(job) {
   const stmt = todayDb.prepare(`
     INSERT INTO today_jobs (
       id, job_id, name, chat_id, fire_at, message, buttons,
-      enabled, fired, source, date, created_at, ref_id
+      enabled, fired, source, date, created_at, ref_id, action
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -295,7 +299,8 @@ export function insertTodayJob(job) {
     job.source || 'recurring',
     job.date,
     now,
-    job.ref_id || null
+    job.ref_id || null,
+    job.action ? JSON.stringify(job.action) : null
   );
 
   logger.debug(`[Scheduler] Today job created: ${job.name} at ${job.fire_at}`);

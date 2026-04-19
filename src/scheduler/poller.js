@@ -5,6 +5,7 @@
 
 import logger from '../utils/logger.js';
 import { getTodayJobs, markFired, deletePastTodayJobs } from './db.js';
+import { getWeather, formatWeather } from '../tools/providers/weather/index.js';
 
 let pollerInterval = null;
 
@@ -80,6 +81,32 @@ export async function checkAndFire(sendMessage) {
   // Fire each due job
   for (const job of dueJobs) {
     try {
+      // Check if this is a tool_call action (e.g., weather)
+      if (job.action?.type === 'tool_call') {
+        const { tool, args } = job.action;
+
+        if (tool === 'get_weather') {
+          // Execute weather tool with saved coordinates (skip geocoding)
+          const weatherResult = await getWeather(args);
+          const weatherText = formatWeather(weatherResult);
+
+          // Send weather directly without LLM processing
+          await sendMessage(job.chat_id, weatherText);
+
+          // Mark as fired
+          markFired(job.id);
+
+          logger.success(`[Scheduler] Fired weather tool: ${job.name} to chat ${job.chat_id}`);
+          continue;
+        }
+
+        // Unknown tool
+        logger.warn(`[Scheduler] Unknown tool: ${tool} in job ${job.id}`);
+        markFired(job.id); // Mark as fired to avoid retries
+        continue;
+      }
+
+      // Standard message job
       // Parse buttons from JSON
       const buttons = job.buttons || [];
 

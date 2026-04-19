@@ -30,6 +30,8 @@ import {
   calculateEndTime,
   calculateNextOccurrence
 } from './tools/scheduler.js';
+import { getWeatherTools } from './tools/weather.js';
+import { getWeather, formatWeather } from './tools/providers/weather/index.js';
 import logger from './utils/logger.js';
 
 /**
@@ -489,15 +491,18 @@ export async function handleMessage(params) {
       currentTimezoneContext: "CRITICAL TIMEZONE RULE: 1. You MUST know the user's explicit timezone offset (like UTC+7, EST, etc). 2. Look for it in the 'User's System Configured Timezone' above, OR in 'Personalization and Context' OR recent messages. 3. If you CANNOT find their explicit timezone offset, DO NOT CALL SCHEDULING TOOLS. Instead, reply: 'Vui lòng cho tôi biết múi giờ của bạn (VD: GMT+7)'. 4. Once you have the timezone offset, calculate the exact UTC time to pass to the tool. Example: User in GMT+7 asks for 14:00 -> Pass 07:00 UTC to tool.",
       location: gatewayState.config?.user?.location || '',
       timezone: gatewayState.config?.user?.timezone || '',
-      availableTools: ['scheduler'],
+      availableTools: ['scheduler', 'weather'],
       chatId: channelId,
       refId,
     },
     // includeMemory: true is default
   });
 
-  // Get scheduler tools
-  const tools = getSchedulerTools();
+  // Get all available tools (scheduler + weather)
+  const tools = [
+    ...getSchedulerTools(),
+    ...getWeatherTools(),
+  ];
 
   // Tool call handler
   const onToolCall = async (name, input) => {
@@ -559,6 +564,20 @@ export async function handleMessage(params) {
       case 'disableJobsByName': {
         const count = await disableJobsByName(input.name, input.dateStr);
         return `Disabled ${count} jobs`;
+      }
+
+      case 'get_weather': {
+        // Get weather for a city
+        const result = await getWeather(input);
+        const formatted = formatWeather(result);
+
+        // Return both formatted text and coordinates for scheduling
+        return JSON.stringify({
+          formatted,
+          lat: result.lat,
+          lon: result.lon,
+          city: input.city
+        }, null, 2);
       }
 
       default:

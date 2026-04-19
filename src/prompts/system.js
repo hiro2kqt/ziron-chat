@@ -304,6 +304,95 @@ BTC: $X,XXX (+X.X% / -X.X% today)
 }
 
 /**
+ * Weather section — how to use the weather tool
+ * @returns {string}
+ */
+export function getWeatherSection() {
+  return `# Weather Tool
+
+You have tool \`get_weather\` to fetch current weather information.
+
+## Chat Query
+
+When Hiro asks about weather for any location:
+→ Call \`get_weather({ city: "tên thành phố" })\`
+→ Summarize the result in natural language, don't repeat all data
+
+Example:
+\`\`\`
+User: "Thời tiết Dortmund?"
+→ get_weather({ city: "Dortmund" })
+→ "Dortmund hiện tại 8°C, nhiều mây, gió nhẹ. Khả năng mưa thấp."
+\`\`\`
+
+## Schedule Weather Job
+
+When Hiro wants recurring weather reminders (e.g., "mỗi ngày 7h check thời tiết Hà Nội"):
+
+**Step 1 — Geocode:** Call \`get_weather({ city })\` to get coordinates
+
+**Step 2 — Create job with action instead of message:**
+\`\`\`javascript
+{
+  action: {
+    type: "tool_call",
+    tool: "get_weather",
+    args: {
+      city: "Hà Nội",
+      lat: <lat from step 1>,
+      lon: <lon from step 1>
+    }
+  }
+}
+\`\`\`
+
+**CRITICAL:**
+- Weather jobs DO NOT have message, DO NOT have buttons
+- MUST have lat + lon in args (from get_weather result in step 1)
+- Scheduler will use coordinates to call API directly, without LLM
+
+## Full Example Flow
+
+\`\`\`
+User: "Mỗi ngày 7h sáng nhắc thời tiết Hà Nội"
+
+Step 1: get_weather({ city: "Hà Nội" })
+→ Result includes: lat: 21.0285, lon: 105.8542
+
+Step 2: addRecurringJob({
+  name: "thoi-tiet-sang",
+  chatId: "...",
+  refId: "...",
+  repeatDays: [],  // every day
+  timeTriggers: [{
+    time: "05:00",  // 7h GMT+2 = 5h UTC
+    message: "",     // empty for tool_call
+    action: {
+      type: "tool_call",
+      tool: "get_weather",
+      args: {
+        city: "Hà Nội",
+        lat: 21.0285,
+        lon: 105.8542
+      }
+    }
+  }]
+})
+
+Response: "Đã tạo nhắc nhở thời tiết Hà Nội lúc 7:00 sáng hàng ngày"
+\`\`\`
+
+## Key Differences from Regular Jobs
+
+| Regular Job | Weather Job |
+|-------------|-------------|
+| Has \`message\` text | Has \`action\` object |
+| May have \`buttons\` | No buttons |
+| Scheduler sends message | Scheduler calls tool |
+| Goes through LLM | Direct API call |`;
+}
+
+/**
  * Scheduler section — how to use the built-in scheduler
  * @returns {string}
  */
@@ -544,6 +633,7 @@ export async function buildSystemPrompt(options = {}) {
   sections.push(getToolsSection(tools));
   sections.push(getOutputSection());
   sections.push(getSchedulerSection());
+  sections.push(getWeatherSection());
 
   // Layer 2 — Dynamic sections
   sections.push(getEnvironmentSection(context));
@@ -571,6 +661,7 @@ export default {
   getToolsSection,
   getOutputSection,
   getSchedulerSection,
+  getWeatherSection,
 
   // Layer 2
   getMemorySection,

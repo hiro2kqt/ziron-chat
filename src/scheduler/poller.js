@@ -55,8 +55,9 @@ export async function checkAndFire(sendMessage) {
   const tm = String(thresholdDate.getUTCMinutes()).padStart(2, '0');
   const ts = String(thresholdDate.getUTCSeconds()).padStart(2, '0');
   const thresholdTimeSec = `${th}:${tm}:${ts}`;
+  const thresholdDateStr = thresholdDate.toISOString().split('T')[0];
 
-  deletePastTodayJobs(thresholdTimeSec, dateStr);
+  deletePastTodayJobs(thresholdTimeSec, thresholdDateStr);
 
   // Get all enabled, unfired jobs for today
   const jobs = getTodayJobs(dateStr);

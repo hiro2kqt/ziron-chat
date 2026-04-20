@@ -13,6 +13,7 @@ import {
   insertTodayJob,
   disableTodayJobsById,
   deleteTodayJobsByMasterId,
+  deletePastTodayJobs,
 } from './db.js';
 
 let syncTimeout = null;
@@ -129,6 +130,9 @@ export async function syncTodayJobs() {
 
     const allJobs = getMasterJobs();
     let syncedCount = 0;
+
+    // Clean up past days' tasks before syncing new ones
+    deletePastTodayJobs('00:00:00', dateStr);
 
     // Disable all existing recurring today_jobs for today
     for (const job of allJobs) {

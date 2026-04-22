@@ -537,7 +537,7 @@ Do NOT just tell Hiro it's cancelled without calling the tool.
 - **Delete forever:** deleteJob(jobId)
 
 ## Formatting Master Jobs
-When listing master jobs using `listMasterJobs` that have `specific_dates` set, show the dates in output:
+When listing master jobs using \`listMasterJobs\` that have \`specific_dates\` set, show the dates in output:
 "Chạy vào: 26/04, 27/04/2026"
 Instead of: "Lặp lại: hàng ngày"`;
 }

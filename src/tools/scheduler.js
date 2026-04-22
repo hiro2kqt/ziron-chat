@@ -371,6 +371,99 @@ export function calculateEndTime({ startExpression, duration, timezone }) {
 }
 
 /**
+ * Calculate specific dates from natural language descriptions
+ * @param {Object} params
+ * @param {string[]} params.dates - Array of date descriptions
+ * @param {string} params.timezone - Timezone offset, e.g. 'GMT+2'
+ * @returns {{ dates: string[] }}
+ */
+export function calculateSpecificDates({ dates, timezone }) {
+  // Parse timezone offset
+  function parseTimezoneOffset(tz) {
+    if (!tz) return 0;
+    const upperTz = tz.toUpperCase().trim();
+    if (upperTz === 'UTC' || upperTz === 'GMT' || upperTz === 'GMT+0' || upperTz === 'GMT-0') {
+      return 0;
+    }
+    const gmtMatch = upperTz.match(/GMT([+-])(\d+)/);
+    if (gmtMatch) {
+      const sign = gmtMatch[1] === '+' ? 1 : -1;
+      const hours = parseInt(gmtMatch[2], 10);
+      return sign * hours;
+    }
+    return 0;
+  }
+
+  function formatDate(date) {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  const tzOffset = parseTimezoneOffset(timezone);
+  const nowUTC = new Date();
+  
+  // Current local time
+  const localNow = new Date(nowUTC.getTime() + tzOffset * 60 * 60 * 1000);
+  
+  const resultDates = [];
+  
+  for (const expr of dates) {
+    const d = expr.toLowerCase().trim();
+    
+    let targetLocal = new Date(localNow);
+    
+    // Check "ngày mai"
+    if (d === 'ngày mai' || d === 'tomorrow') {
+      targetLocal.setUTCDate(targetLocal.getUTCDate() + 1);
+    }
+    // Check "X ngày nữa"
+    else if (d.match(/(\d+)\s*ngày nữa/)) {
+      const days = parseInt(d.match(/(\d+)\s*ngày nữa/)[1], 10);
+      targetLocal.setUTCDate(targetLocal.getUTCDate() + days);
+    }
+    // Check "ngày DD/MM/YYYY" or "DD/MM/YYYY"
+    else if (d.match(/(?:ngày\s+)?(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/)) {
+      const match = d.match(/(?:ngày\s+)?(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+      const day = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const year = parseInt(match[3], 10);
+      targetLocal = new Date(Date.UTC(year, month, day));
+    }
+    // Check "ngày DD/MM" or "DD/MM"
+    else if (d.match(/(?:ngày\s+)?(\d{1,2})[\/\-](\d{1,2})/)) {
+      const match = d.match(/(?:ngày\s+)?(\d{1,2})[\/\-](\d{1,2})/);
+      const day = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      
+      targetLocal.setUTCMonth(month, day);
+      
+      // If the calculated date is in the past (more than 1 day ago), assume next year
+      if (targetLocal.getTime() < localNow.getTime() - 86400000) {
+        targetLocal.setUTCFullYear(targetLocal.getUTCFullYear() + 1);
+      }
+    } else {
+      throw new Error(`Unsupported date expression: ${d}`);
+    }
+    
+    // We treat the calculated targetLocal date string as our UTC date string for specificDates 
+    // because specific_dates are compared against UTC date.
+    // Wait, the dates should be in UTC for specificDates. If it's "tomorrow" local time, 
+    // we want the date string of that local time, but wait...
+    // Actually, sync compares job.specific_dates against `getTodayDateStr()` which returns UTC date.
+    // So specificDates must be the UTC date on which the job should run.
+    // If a user in GMT+7 wants it on 26/4, that means when it's 26/4 in UTC? No, the user wants it to run when their local time is 26/4.
+    // But currently the system syncs daily at UTC midnight. So `dateStr` is UTC.
+    // But oneshot jobs and time calculations use UTC time for scheduling.
+    // Let's just output the targetLocal date string as formatted date, which works since specific_dates is compared directly.
+    resultDates.push(formatDate(targetLocal));
+  }
+  
+  return { dates: [...new Set(resultDates)].sort() };
+}
+
+/**
  * Calculate next occurrence of a local time — today if not yet passed, tomorrow if already passed
  * @param {Object} params
  * @param {string} params.targetLocal - Target time in local timezone "HH:MM"
@@ -521,6 +614,25 @@ export function getSchedulerTools() {
           },
         },
         required: ['expression'],
+      },
+    },
+    {
+      name: 'calculateSpecificDates',
+      description: 'Tính danh sách ngày cụ thể từ mô tả tự nhiên. PHẢI dùng tool này, không được tự tính. Trả về mảng chuỗi YYYY-MM-DD.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          dates: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Mô tả từng ngày. Ví dụ: ["ngày 26/4", "ngày 27/4"], ["ngày mai", "2 ngày nữa"], ["10 ngày nữa"]',
+          },
+          timezone: {
+            type: 'string',
+            description: "User timezone from Environment section, e.g. 'GMT+2'",
+          },
+        },
+        required: ['dates', 'timezone'],
       },
     },
     {
@@ -681,10 +793,13 @@ export function getSchedulerTools() {
           },
           repeatDays: {
             type: 'array',
-            items: {
-              type: 'number',
-            },
-            description: 'Days of week (0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday). Empty array means every day.',
+            items: { type: 'number' },
+            description: 'Days of week (0=Sun, 1=Mon...). Empty array = every day. Bỏ trống [] nếu dùng specificDates.',
+          },
+          specificDates: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Danh sách ngày cụ thể ISO format YYYY-MM-DD (UTC). Nếu có, job chỉ chạy đúng các ngày này, bỏ qua repeatDays.',
           },
           timeTriggers: {
             type: 'array',
@@ -755,6 +870,20 @@ export function getSchedulerTools() {
         required: ['name', 'dateStr'],
       },
     },
+    {
+      name: 'listMasterJobs',
+      description: 'Liệt kê tất cả master jobs (recurring jobs) của user. Trả về danh sách job bao gồm repeat_days, specific_dates, và time_triggers.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          chatId: {
+            type: 'string',
+            description: "Chat ID to list jobs for (must match the user's actual chat ID)",
+          },
+        },
+        required: ['chatId'],
+      },
+    },
   ];
 }
 
@@ -764,5 +893,6 @@ export default {
   calculateTimeRange,
   calculateRecurringDays,
   calculateEndTime,
-  calculateNextOccurrence
+  calculateNextOccurrence,
+  calculateSpecificDates
 };

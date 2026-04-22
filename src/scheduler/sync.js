@@ -14,6 +14,7 @@ import {
   disableTodayJobsById,
   deleteTodayJobsByMasterId,
   deletePastTodayJobs,
+  updateMasterJob,
 } from './db.js';
 
 let syncTimeout = null;
@@ -48,9 +49,15 @@ function getTodayDateStr() {
 /**
  * Check if a master job should run today
  * @param {Object} job - Master job object
+ * @param {string} dateStr - Date in YYYY-MM-DD format
  * @returns {boolean} True if job should run today
  */
-function shouldRunToday(job) {
+function shouldRunToday(job, dateStr) {
+  // specific_dates overrides repeat_days completely
+  if (job.specific_dates && job.specific_dates.length > 0) {
+    return job.specific_dates.includes(dateStr);
+  }
+
   const dayOfWeek = new Date().getUTCDay();
   const repeatDays = job.repeat_days || [];
   return repeatDays.length === 0 || repeatDays.includes(dayOfWeek);
@@ -141,11 +148,20 @@ export async function syncTodayJobs() {
 
     // Re-create from master
     for (const job of allJobs) {
-      if (shouldRunToday(job)) {
+      if (shouldRunToday(job, dateStr)) {
         const count = createTodayJobsFromMaster(job, dateStr);
         syncedCount += count;
       } else {
-        logger.debug(`[Scheduler] Skipping job ${job.name} (not scheduled for day ${dayOfWeek})`);
+        logger.debug(`[Scheduler] Skipping job ${job.name} (not scheduled for today)`);
+      }
+      
+      // Auto-disable expired specific_dates jobs
+      if (job.specific_dates && job.specific_dates.length > 0) {
+        const allPast = job.specific_dates.every(d => d < dateStr);
+        if (allPast && job.enabled) {
+          updateMasterJob(job.id, { enabled: false });
+          logger.info(`[Scheduler] Auto-disabled expired specific_dates job: ${job.name}`);
+        }
       }
     }
 
@@ -180,7 +196,7 @@ export async function reSyncJob(jobId) {
     }
 
     // 3. Check if should run today
-    if (!shouldRunToday(job)) {
+    if (!shouldRunToday(job, dateStr)) {
       logger.debug(`[Scheduler] Job ${job.name} should not run today - skipping`);
       return;
     }

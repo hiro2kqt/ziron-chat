@@ -33,3 +33,4 @@ documents
 config.json
 tool-test
 test-weather-sync.js
+.claude

@@ -28,7 +28,8 @@ import {
   calculateTimeRange,
   calculateRecurringDays,
   calculateEndTime,
-  calculateNextOccurrence
+  calculateNextOccurrence,
+  calculateSpecificDates
 } from './tools/scheduler.js';
 import { getWeatherTools } from './tools/weather.js';
 import { getWeather, formatWeather } from './tools/providers/weather/index.js';
@@ -541,6 +542,11 @@ export async function handleMessage(params) {
         return JSON.stringify(result, null, 2);
       }
 
+      case 'calculateSpecificDates': {
+        const result = calculateSpecificDates(input);
+        return JSON.stringify(result, null, 2);
+      }
+
       case 'addOneshotJob': {
         const job = await addOneshotJob(input);
         return `Oneshot job created: ${job.name} at ${job.fire_at}`;
@@ -564,6 +570,11 @@ export async function handleMessage(params) {
       case 'disableJobsByName': {
         const count = await disableJobsByName(input.name, input.dateStr);
         return `Disabled ${count} jobs`;
+      }
+
+      case 'listMasterJobs': {
+        const jobs = await listMasterJobs(input.chatId);
+        return JSON.stringify(jobs, null, 2);
       }
 
       case 'get_weather': {

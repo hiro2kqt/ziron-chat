@@ -79,6 +79,9 @@ export function initDatabases() {
   // Add action column for tool_call actions (stores JSON)
   try { todayDb.exec("ALTER TABLE today_jobs ADD COLUMN action TEXT;"); } catch (e) {}
 
+  // Add specific_dates column for recurring jobs on specific dates
+  try { jobsDb.exec("ALTER TABLE jobs ADD COLUMN specific_dates TEXT DEFAULT '[]';"); } catch (e) {}
+
   // Set secure file permissions
   try {
     fs.chmodSync(JOBS_DB_PATH, 0o600);
@@ -107,6 +110,7 @@ export function getMasterJobs() {
     ...row,
     enabled: Boolean(row.enabled),
     repeat_days: JSON.parse(row.repeat_days || '[]'),
+    specific_dates: JSON.parse(row.specific_dates || '[]'),
     time_triggers: JSON.parse(row.time_triggers || '[]'),
   }));
 }
@@ -131,6 +135,7 @@ export function getMasterJobById(jobId) {
     ...row,
     enabled: Boolean(row.enabled),
     repeat_days: JSON.parse(row.repeat_days || '[]'),
+    specific_dates: JSON.parse(row.specific_dates || '[]'),
     time_triggers: JSON.parse(row.time_triggers || '[]'),
   };
 }
@@ -172,8 +177,8 @@ export function insertMasterJob(job) {
   const now = new Date().toISOString();
 
   const stmt = jobsDb.prepare(`
-    INSERT INTO jobs (id, name, enabled, repeat_days, time_triggers, chat_id, created_at, updated_at, ref_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO jobs (id, name, enabled, repeat_days, specific_dates, time_triggers, chat_id, created_at, updated_at, ref_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -181,6 +186,7 @@ export function insertMasterJob(job) {
     job.name,
     job.enabled !== undefined ? (job.enabled ? 1 : 0) : 1,
     JSON.stringify(job.repeat_days || []),
+    JSON.stringify(job.specific_dates || job.specificDates || []),
     JSON.stringify(job.time_triggers || []),
     String(job.chat_id),
     now,
@@ -222,6 +228,13 @@ export function updateMasterJob(id, fields) {
   if (fields.repeat_days !== undefined) {
     updates.push('repeat_days = ?');
     values.push(JSON.stringify(fields.repeat_days));
+  }
+  if (fields.specific_dates !== undefined) {
+    updates.push('specific_dates = ?');
+    values.push(JSON.stringify(fields.specific_dates));
+  } else if (fields.specificDates !== undefined) {
+    updates.push('specific_dates = ?');
+    values.push(JSON.stringify(fields.specificDates));
   }
   if (fields.time_triggers !== undefined) {
     updates.push('time_triggers = ?');

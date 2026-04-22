@@ -57,18 +57,20 @@ export async function initScheduler(sendMessage) {
  * @param {Object} params - Job parameters
  * @param {string} params.name - Job name
  * @param {Array<number>} params.repeatDays - Days of week (0=Sun, 1=Mon, etc). Empty = every day
+ * @param {Array<string>} [params.specificDates] - Optional list of specific dates (YYYY-MM-DD)
  * @param {Array<Object>} params.timeTriggers - Time triggers with message and buttons
  * @param {string} params.chatId - Chat ID
  * @param {string} [params.refId] - Reference ID for grouping
  * @returns {Promise<Object>} Created job
  */
 export async function addRecurringJob(params) {
-  const { name, repeatDays = [], timeTriggers, chatId, refId } = params;
+  const { name, repeatDays = [], specificDates = [], timeTriggers, chatId, refId } = params;
 
   // Insert master job
   const job = insertMasterJob({
     name,
     repeat_days: repeatDays,
+    specific_dates: specificDates,
     time_triggers: timeTriggers,
     chat_id: chatId,
     enabled: true,
@@ -89,6 +91,7 @@ export async function addRecurringJob(params) {
  * @param {Object} fields - Fields to update
  * @param {string} [fields.name] - Job name
  * @param {Array<number>} [fields.repeatDays] - Days of week
+ * @param {Array<string>} [fields.specificDates] - Specific dates
  * @param {Array<Object>} [fields.timeTriggers] - Time triggers
  * @returns {Promise<Object>} Updated job
  */
@@ -97,6 +100,7 @@ export async function editRecurringJob(jobId, fields) {
   const updated = updateMasterJob(jobId, {
     name: fields.name,
     repeat_days: fields.repeatDays,
+    specific_dates: fields.specificDates,
     time_triggers: fields.timeTriggers,
   });
 

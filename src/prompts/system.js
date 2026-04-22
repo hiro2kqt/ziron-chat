@@ -417,8 +417,10 @@ NEVER calculate time yourself. ALWAYS use these calculation tools:
 | "từ 10h đến 13h mỗi 30p" | \`calculateTimeRange({ fromLocal: "10:00", toLocal: "13:00", intervalMinutes: 30, timezone })\` |
 | "trong 2 tiếng" (with start) | \`calculateEndTime({ startExpression: "now", duration: "2h", timezone })\` |
 | "thứ 2, 4, 6" | \`calculateRecurringDays({ expression: "thứ 2, 4, 6" })\` |
+| "ngày 26/4", "ngày mai", "3 ngày nữa" | \`calculateSpecificDates({ dates: ["ngày 26/4"], timezone })\` |
 
 **Rules:**
+- QUAN TRỌNG: Khi tạo job có ngày cụ thể, PHẢI gọi \`calculateSpecificDates\` trước. KHÔNG được tự tính ngày từ thông tin trong context.
 - For single future reminders: use \`calculateNextOccurrence\` to avoid scheduling in the past
 - For intervals: use \`calculateTimeRange\`, then use \`utcTimes\` array to build \`timeTriggers\`
 - For recurring days: always use \`calculateRecurringDays\`, never guess the day numbers
@@ -445,6 +447,24 @@ addRecurringJob({ name, chatId, refId, repeatDays: [], timeTriggers: [{ time, me
 \`\`\`javascript
 addRecurringJob({ name, chatId, refId, repeatDays: [1,3,5], timeTriggers: [...] })
 \`\`\`
+
+**Recurring specific dates:**
+\`\`\`javascript
+addRecurringJob({ name, chatId, refId, specificDates: ["2026-04-26", "2026-04-27"], repeatDays: [], timeTriggers: [...] })
+\`\`\`
+
+### Job theo ngày cụ thể
+Khi user muốn nhắc vào ngày cụ thể (ví dụ: "ngày 26 và 27/4"):
+→ Dùng \`addRecurringJob\` với \`specificDates\` thay vì \`repeatDays\`.
+→ Luôn gọi \`calculateSpecificDates\` trước để lấy \`specificDates\`.
+→ Convert ngày sang ISO UTC: "26/4/2026" → "2026-04-26".
+→ \`repeatDays\` để \`[]\` khi đã có \`specificDates\`.
+→ Job tự động disable sau khi tất cả ngày đã qua.
+
+Ví dụ:
+User: "nhắc tôi ngày 26 và 27/4 lúc 9h đi học reference"
+→ \`calculateSpecificDates({ dates: ["ngày 26/4", "ngày 27/4"], timezone: "GMT+2" })\`
+→ \`addRecurringJob({ name: "hoc-reference", specificDates: ["2026-04-26", "2026-04-27"], repeatDays: [], timeTriggers: [{ time: "07:00", message: "Hiro nhớ đi học reference hôm nay nhé!" }] })\`
 
 **Interval (multiple reminders in a time range):**
 \`\`\`javascript
@@ -514,7 +534,12 @@ Do NOT just tell Hiro it's cancelled without calling the tool.
 - **List today:** listTodayJobs(chatId)
 - **List all:** listMasterJobs(chatId)
 - **Cancel today:** disableJobsByName(name, dateStr)
-- **Delete forever:** deleteJob(jobId)`;
+- **Delete forever:** deleteJob(jobId)
+
+## Formatting Master Jobs
+When listing master jobs using `listMasterJobs` that have `specific_dates` set, show the dates in output:
+"Chạy vào: 26/04, 27/04/2026"
+Instead of: "Lặp lại: hàng ngày"`;
 }
 
 // ============================================================================

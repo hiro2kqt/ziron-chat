@@ -6,6 +6,7 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import EmailState from '../../../db/models/EmailState.js';
+import Email from '../../../db/models/Email.js';
 import { classifyEmail } from './classifier.js';
 import logger from '../../../utils/logger.js';
 
@@ -119,6 +120,28 @@ export async function checkNewEmails(imapConfig, mailbox = 'INBOX') {
           from: email.from,
           snippet: email.snippet,
         });
+
+        // Save email to MongoDB (upsert by mailbox + uid)
+        try {
+          await Email.findOneAndUpdate(
+            { mailbox, uid: email.uid },
+            {
+              uid: email.uid,
+              mailbox,
+              subject: email.subject,
+              from: email.from,
+              date: new Date(email.date),
+              snippet: email.snippet,
+              important: classification.important,
+              category: classification.category,
+              summary: classification.reason,
+            },
+            { upsert: true, new: true }
+          );
+          logger.debug(`[Email Monitor] Saved email UID ${email.uid} to MongoDB`);
+        } catch (saveErr) {
+          logger.error(`[Email Monitor] Failed to save email UID ${email.uid}:`, saveErr.message);
+        }
 
         if (classification.important) {
           importantEmails.push({

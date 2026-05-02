@@ -4,10 +4,12 @@
 
 import { checkNewEmails as checkNewEmailsImpl } from './monitor.js';
 import { classifyEmail as classifyEmailImpl } from './classifier.js';
+import { queryEmails as queryEmailsImpl, formatQueryResults as formatQueryResultsImpl } from './query.js';
 
 // Re-export for named imports
 export { checkNewEmails } from './monitor.js';
 export { classifyEmail } from './classifier.js';
+export { queryEmails, formatQueryResults } from './query.js';
 
 /**
  * Format important emails for notification
@@ -54,5 +56,7 @@ export function formatEmailNotification(emails) {
 export default {
   checkNewEmails: checkNewEmailsImpl,
   classifyEmail: classifyEmailImpl,
+  queryEmails: queryEmailsImpl,
   formatEmailNotification,
+  formatQueryResults: formatQueryResultsImpl,
 };

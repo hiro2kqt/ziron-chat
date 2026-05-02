@@ -34,7 +34,7 @@ import {
 import { getWeatherTools } from './tools/weather.js';
 import { getWeather, formatWeather } from './tools/providers/weather/index.js';
 import { getEmailTools } from './tools/email.js';
-import { checkNewEmails, formatEmailNotification } from './tools/providers/email/index.js';
+import { checkNewEmails, formatEmailNotification, queryEmails, formatQueryResults } from './tools/providers/email/index.js';
 import { connectMongo } from './db/mongo.js';
 import logger from './utils/logger.js';
 
@@ -604,7 +604,7 @@ export async function handleMessage(params) {
       currentTimezoneContext: "CRITICAL TIMEZONE RULE: 1. You MUST know the user's explicit timezone offset (like UTC+7, EST, etc). 2. Look for it in the 'User's System Configured Timezone' above, OR in 'Personalization and Context' OR recent messages. 3. If you CANNOT find their explicit timezone offset, DO NOT CALL SCHEDULING TOOLS. Instead, reply: 'Vui lòng cho tôi biết múi giờ của bạn (VD: GMT+7)'. 4. Once you have the timezone offset, calculate the exact UTC time to pass to the tool. Example: User in GMT+7 asks for 14:00 -> Pass 07:00 UTC to tool.",
       location: gatewayState.config?.user?.location || '',
       timezone: gatewayState.config?.user?.timezone || '',
-      availableTools: ['scheduler', 'weather', 'email'],
+      availableTools: ['scheduler', 'weather', 'email', 'query_emails'],
       chatId: channelId,
       refId,
     },
@@ -720,6 +720,25 @@ export async function handleMessage(params) {
         const notification = formatEmailNotification(importantEmails);
 
         return notification || 'No new important emails';
+      }
+
+      case 'query_emails': {
+        // Query stored emails from MongoDB
+        const emailConfig = gatewayState.config?.tools?.email;
+
+        if (!emailConfig?.enabled) {
+          return 'Email monitoring is not enabled in config. No emails are stored.';
+        }
+
+        try {
+          const emails = await queryEmails(input);
+          const results = formatQueryResults(emails);
+
+          return results;
+        } catch (err) {
+          logger.error('[Gateway] query_emails error:', err.message);
+          return `Error querying emails: ${err.message}`;
+        }
       }
 
       default:

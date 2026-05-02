@@ -395,6 +395,24 @@ class OpenRouterProviderAdapter {
 }
 
 /**
+ * Get active chat IDs from session map
+ * @returns {Array<string>} Array of chat IDs
+ */
+function getActiveChatIds() {
+  const chatIds = [];
+
+  for (const [channelKey, sessionId] of gatewayState.sessionMap.entries()) {
+    // channelKey format: "telegram:123456789"
+    const match = channelKey.match(/^telegram:(.+)$/);
+    if (match) {
+      chatIds.push(match[1]);
+    }
+  }
+
+  return chatIds;
+}
+
+/**
  * Start email polling if enabled
  * @param {Function} sendMessage - Telegram sendMessage function
  * @returns {void}
@@ -409,11 +427,6 @@ function startEmailPolling(sendMessage) {
 
   if (!emailConfig.imap?.host || !emailConfig.imap?.user || !emailConfig.imap?.pass) {
     logger.warn('[Email Monitor] IMAP configuration incomplete, skipping email polling');
-    return;
-  }
-
-  if (!emailConfig.notifyChatId) {
-    logger.warn('[Email Monitor] No notifyChatId configured, skipping email polling');
     return;
   }
 
@@ -432,11 +445,26 @@ function startEmailPolling(sendMessage) {
       if (importantEmails.length > 0) {
         const notification = formatEmailNotification(importantEmails);
 
-        await sendMessage(emailConfig.notifyChatId, notification, {
-          parse_mode: 'Markdown',
-        });
+        // Send to all active Telegram chats
+        const chatIds = getActiveChatIds();
 
-        logger.success(`[Email Monitor] Sent notification for ${importantEmails.length} email(s)`);
+        if (chatIds.length === 0) {
+          logger.warn('[Email Monitor] No active chats to send notification to');
+          return;
+        }
+
+        for (const chatId of chatIds) {
+          try {
+            await sendMessage(chatId, notification, {
+              parse_mode: 'Markdown',
+            });
+            logger.success(`[Email Monitor] Sent notification to chat ${chatId}`);
+          } catch (sendErr) {
+            logger.error(`[Email Monitor] Failed to send to chat ${chatId}:`, sendErr.message);
+          }
+        }
+
+        logger.success(`[Email Monitor] Notifications sent for ${importantEmails.length} email(s)`);
       } else {
         logger.debug('[Email Monitor] No important emails found');
       }

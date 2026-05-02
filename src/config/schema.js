@@ -44,7 +44,6 @@ export const DEFAULT_CONFIG = {
     email: {
       enabled: false,
       pollIntervalHours: 2,
-      notifyChatId: '',
       imap: {
         host: '',
         port: 993,

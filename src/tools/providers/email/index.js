@@ -2,6 +2,10 @@
  * Email Tool - Main Entry Point
  */
 
+import { checkNewEmails as checkNewEmailsImpl } from './monitor.js';
+import { classifyEmail as classifyEmailImpl } from './classifier.js';
+
+// Re-export for named imports
 export { checkNewEmails } from './monitor.js';
 export { classifyEmail } from './classifier.js';
 
@@ -48,7 +52,7 @@ export function formatEmailNotification(emails) {
 }
 
 export default {
-  checkNewEmails,
-  classifyEmail,
+  checkNewEmails: checkNewEmailsImpl,
+  classifyEmail: classifyEmailImpl,
   formatEmailNotification,
 };

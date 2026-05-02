@@ -10,7 +10,7 @@ const emailStateSchema = new mongoose.Schema({
     type: String,
     required: true,
     default: 'INBOX',
-    unique: true,
+    unique: true, // This already creates an index
   },
   lastSeenUID: {
     type: Number,
@@ -24,9 +24,6 @@ const emailStateSchema = new mongoose.Schema({
 }, {
   timestamps: true, // Auto-manages createdAt and updatedAt
 });
-
-// Create index for efficient queries
-emailStateSchema.index({ mailbox: 1 });
 
 const EmailState = mongoose.model('EmailState', emailStateSchema);
 

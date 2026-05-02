@@ -1,9 +1,9 @@
 /**
  * Email Classifier
- * Uses Claude API to classify email importance
+ * Uses existing LLM provider to classify email importance
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { chat } from '../../../providers/openrouter.js';
 import { loadConfig } from '../../../config/index.js';
 import logger from '../../../utils/logger.js';
 
@@ -28,7 +28,6 @@ export async function classifyEmail(email) {
 
   const { subject, from, snippet } = email;
 
-  // Use Claude via OpenRouter
   const prompt = `You are an email classifier for a university student. Classify if this email is IMPORTANT.
 
 IMPORTANT emails are those related to university matters:
@@ -56,31 +55,12 @@ Respond in JSON format:
 }`;
 
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/yourusername/ziron',
-        'X-Title': 'Ziron Email Classifier',
-      },
-      body: JSON.stringify({
-        model: 'anthropic/claude-3.5-sonnet',
-        messages: [
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.3,
-        max_tokens: 200,
-      }),
+    // Use existing chat function with configured model
+    const content = await chat(prompt, apiKey, {
+      model: config.providers?.openrouter?.model,
+      maxTokens: 200,
+      temperature: 0.3,
     });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
-    }
-
-    const data = await response.json();
-    const content = data.choices[0]?.message?.content;
 
     if (!content) {
       throw new Error('No response from classifier');

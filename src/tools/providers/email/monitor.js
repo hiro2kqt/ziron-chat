@@ -13,15 +13,15 @@ import logger from '../../../utils/logger.js';
 /**
  * Process a batch of emails (fetch, parse, classify, save)
  * @param {ImapFlow} client - Connected IMAP client
- * @param {string} range - UID range to fetch (e.g., "1:50")
+ * @param {string} uidList - UID list to fetch (e.g., "1,5,10" or "1:50")
  * @param {string} mailbox - Mailbox name
  * @returns {Promise<Object>} { processedCount, highestUID, importantEmails }
  */
-async function processBatch(client, range, mailbox) {
+async function processBatch(client, uidList, mailbox) {
   const emails = [];
   let highestUID = 0;
 
-  for await (const msg of client.fetch(range, { source: true })) {
+  for await (const msg of client.fetch(uidList, { source: true, uid: true })) {
     try {
       const parsed = await simpleParser(msg.source);
 
@@ -143,13 +143,14 @@ async function performFullSync(client, lock, mailbox, totalMessages, startDate =
   // Process UIDs in batches
   for (let i = 0; i < uids.length; i += BATCH_SIZE) {
     const batchUIDs = uids.slice(i, Math.min(i + BATCH_SIZE, uids.length));
-    const range = `${batchUIDs[0]}:${batchUIDs[batchUIDs.length - 1]}`;
+    // Use comma-separated UIDs, not range - only fetch the specific UIDs from search
+    const uidList = batchUIDs.join(',');
 
-    logger.info(`[Email Monitor] Processing batch: UIDs ${range} (${totalProcessed}/${uids.length})`);
+    logger.info(`[Email Monitor] Processing batch: ${batchUIDs.length} UIDs (${totalProcessed}/${uids.length})`);
 
     try {
       const { processedCount, highestUID: batchHighestUID, importantEmails } =
-        await processBatch(client, range, mailbox);
+        await processBatch(client, uidList, mailbox);
 
       totalProcessed += processedCount;
       totalImportant += importantEmails.length;
@@ -170,7 +171,7 @@ async function performFullSync(client, lock, mailbox, totalMessages, startDate =
       logger.info(`[Email Monitor] Batch complete: ${processedCount} processed, ${importantEmails.length} important`);
 
     } catch (batchErr) {
-      logger.error(`[Email Monitor] Batch ${range} failed:`, batchErr.message);
+      logger.error(`[Email Monitor] Batch failed (${batchUIDs.length} UIDs):`, batchErr.message);
       // Continue with next batch even if this one fails
     }
   }

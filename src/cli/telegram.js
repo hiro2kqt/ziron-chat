@@ -8,7 +8,7 @@ import { createClient, validateBotToken } from '../channels/telegram/index.js';
 import { chat as openrouterChat } from '../providers/openrouter.js';
 import { chat as openaiChat } from '../providers/openai.js';
 import { chat as openaiCodexChat } from '../providers/openai-codex.js';
-import { handleMessage, resetSession, getSessionId, initScheduler, addOneshotJob } from '../gateway.js';
+import { handleMessage, resetSession, getSessionId, initScheduler, addOneshotJob, initEmailMonitoring } from '../gateway.js';
 import { loadSession } from '../storage/history.js';
 import { handleCallback } from '../scheduler/callbacks.js';
 import { handleInlineAction } from '../channels/telegram/actions.js';
@@ -143,19 +143,29 @@ export async function connectCommand() {
     };
 
     // Initialize scheduler before bot starts
-    try {
-      await initScheduler(async (chatId, text, options = {}) => {
-        if (!text || text.trim() === '') {
-          return; // Don't send empty messages
-        }
-        await client.sendMessage(chatId, text, {
-          parse_mode: 'Markdown',
-          ...options,
-        });
+    const sendMessage = async (chatId, text, options = {}) => {
+      if (!text || text.trim() === '') {
+        return; // Don't send empty messages
+      }
+      await client.sendMessage(chatId, text, {
+        parse_mode: 'Markdown',
+        ...options,
       });
+    };
+
+    try {
+      await initScheduler(sendMessage);
     } catch (err) {
       logger.error('Scheduler initialization failed:', err.message);
       logger.warn('Bot will continue without scheduler');
+    }
+
+    // Initialize email monitoring if enabled
+    try {
+      initEmailMonitoring(sendMessage);
+    } catch (err) {
+      logger.error('Email monitoring initialization failed:', err.message);
+      logger.warn('Bot will continue without email monitoring');
     }
 
     // Register callback query handler for scheduler buttons

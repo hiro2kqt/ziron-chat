@@ -33,6 +33,9 @@ import {
 } from './tools/scheduler.js';
 import { getWeatherTools } from './tools/weather.js';
 import { getWeather, formatWeather } from './tools/providers/weather/index.js';
+import { getEmailTools } from './tools/email.js';
+import { checkNewEmails, formatEmailNotification } from './tools/providers/email/index.js';
+import { connectMongo } from './db/mongo.js';
 import logger from './utils/logger.js';
 
 /**
@@ -53,6 +56,8 @@ let gatewayState = {
   sessionMap: new Map(), // channelKey -> sessionId
   sessionMapPath: null,
   messageCounters: new Map(), // sessionId -> message count
+  emailPollInterval: null, // Email polling interval ID
+  sendMessageCallback: null, // Telegram sendMessage function for email notifications
 };
 
 /**
@@ -390,6 +395,81 @@ class OpenRouterProviderAdapter {
 }
 
 /**
+ * Start email polling if enabled
+ * @param {Function} sendMessage - Telegram sendMessage function
+ * @returns {void}
+ */
+function startEmailPolling(sendMessage) {
+  const emailConfig = gatewayState.config?.tools?.email;
+
+  if (!emailConfig?.enabled) {
+    logger.debug('[Email Monitor] Email monitoring disabled in config');
+    return;
+  }
+
+  if (!emailConfig.imap?.host || !emailConfig.imap?.user || !emailConfig.imap?.pass) {
+    logger.warn('[Email Monitor] IMAP configuration incomplete, skipping email polling');
+    return;
+  }
+
+  if (!emailConfig.notifyChatId) {
+    logger.warn('[Email Monitor] No notifyChatId configured, skipping email polling');
+    return;
+  }
+
+  const intervalHours = emailConfig.pollIntervalHours || 2;
+  const intervalMs = intervalHours * 60 * 60 * 1000;
+
+  logger.info(`[Email Monitor] Starting email polling (every ${intervalHours} hour(s))`);
+
+  // Poll function
+  const pollEmails = async () => {
+    try {
+      logger.info('[Email Monitor] Checking for new emails...');
+
+      const importantEmails = await checkNewEmails(emailConfig.imap);
+
+      if (importantEmails.length > 0) {
+        const notification = formatEmailNotification(importantEmails);
+
+        await sendMessage(emailConfig.notifyChatId, notification, {
+          parse_mode: 'Markdown',
+        });
+
+        logger.success(`[Email Monitor] Sent notification for ${importantEmails.length} email(s)`);
+      } else {
+        logger.debug('[Email Monitor] No important emails found');
+      }
+
+    } catch (err) {
+      logger.error('[Email Monitor] Polling error:', err.message);
+    }
+  };
+
+  // Run immediately on startup
+  pollEmails().catch(err => {
+    logger.error('[Email Monitor] Initial poll failed:', err.message);
+  });
+
+  // Schedule recurring polls
+  gatewayState.emailPollInterval = setInterval(pollEmails, intervalMs);
+
+  logger.success(`[Email Monitor] Email polling started`);
+}
+
+/**
+ * Stop email polling
+ * @returns {void}
+ */
+export function stopEmailPolling() {
+  if (gatewayState.emailPollInterval) {
+    clearInterval(gatewayState.emailPollInterval);
+    gatewayState.emailPollInterval = null;
+    logger.info('[Email Monitor] Email polling stopped');
+  }
+}
+
+/**
  * Initialize the gateway
  * Must be called once on startup before handling any messages
  * @returns {Promise<void>}
@@ -449,8 +529,40 @@ export async function initializeGateway() {
   // Create ZironClient
   gatewayState.client = createClient(provider);
 
+  // Initialize MongoDB if email is enabled
+  if (config.tools?.email?.enabled) {
+    const mongoUri = config.database?.mongoUri;
+    if (mongoUri) {
+      try {
+        await connectMongo(mongoUri);
+        logger.success('[Email Monitor] MongoDB connected for email state tracking');
+      } catch (err) {
+        logger.error('[Email Monitor] MongoDB connection failed:', err.message);
+        logger.warn('[Email Monitor] Email monitoring will be disabled');
+        config.tools.email.enabled = false;
+      }
+    } else {
+      logger.warn('[Email Monitor] No MongoDB URI configured, email monitoring disabled');
+      config.tools.email.enabled = false;
+    }
+  }
+
   gatewayState.initialized = true;
   logger.success('Gateway initialized with OpenRouter provider');
+}
+
+/**
+ * Initialize email monitoring (call after scheduler is initialized)
+ * @param {Function} sendMessage - Telegram sendMessage function
+ * @returns {void}
+ */
+export function initEmailMonitoring(sendMessage) {
+  if (!gatewayState.initialized) {
+    throw new Error('Gateway must be initialized first');
+  }
+
+  gatewayState.sendMessageCallback = sendMessage;
+  startEmailPolling(sendMessage);
 }
 
 /**
@@ -492,17 +604,18 @@ export async function handleMessage(params) {
       currentTimezoneContext: "CRITICAL TIMEZONE RULE: 1. You MUST know the user's explicit timezone offset (like UTC+7, EST, etc). 2. Look for it in the 'User's System Configured Timezone' above, OR in 'Personalization and Context' OR recent messages. 3. If you CANNOT find their explicit timezone offset, DO NOT CALL SCHEDULING TOOLS. Instead, reply: 'Vui lòng cho tôi biết múi giờ của bạn (VD: GMT+7)'. 4. Once you have the timezone offset, calculate the exact UTC time to pass to the tool. Example: User in GMT+7 asks for 14:00 -> Pass 07:00 UTC to tool.",
       location: gatewayState.config?.user?.location || '',
       timezone: gatewayState.config?.user?.timezone || '',
-      availableTools: ['scheduler', 'weather'],
+      availableTools: ['scheduler', 'weather', 'email'],
       chatId: channelId,
       refId,
     },
     // includeMemory: true is default
   });
 
-  // Get all available tools (scheduler + weather)
+  // Get all available tools (scheduler + weather + email)
   const tools = [
     ...getSchedulerTools(),
     ...getWeatherTools(),
+    ...getEmailTools(),
   ];
 
   // Tool call handler
@@ -589,6 +702,24 @@ export async function handleMessage(params) {
           lon: result.lon,
           city: input.city
         }, null, 2);
+      }
+
+      case 'check_emails': {
+        // Check for new important emails
+        const emailConfig = gatewayState.config?.tools?.email;
+
+        if (!emailConfig?.enabled) {
+          return 'Email monitoring is not enabled in config';
+        }
+
+        if (!emailConfig.imap?.host || !emailConfig.imap?.user || !emailConfig.imap?.pass) {
+          return 'Email IMAP configuration incomplete';
+        }
+
+        const importantEmails = await checkNewEmails(emailConfig.imap);
+        const notification = formatEmailNotification(importantEmails);
+
+        return notification || 'No new important emails';
       }
 
       default:
@@ -692,4 +823,6 @@ export default {
   getGatewayStatus,
   resetSession,
   getSessionId,
+  initEmailMonitoring,
+  stopEmailPolling,
 };

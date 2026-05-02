@@ -10,6 +10,9 @@
   "telegram": {
     "botToken": ""
   },
+  "database": {
+    "mongoUri": "mongodb://localhost:27017/ziron"
+  },
   "settings": {
     "logLevel": "info"
   },
@@ -17,5 +20,21 @@
     "timezone": "",
     "location": "",
     "name": ""
+  },
+  "tools": {
+    "weather": {
+      "googleApiKey": ""
+    },
+    "email": {
+      "enabled": false,
+      "pollIntervalHours": 2,
+      "notifyChatId": "",
+      "imap": {
+        "host": "unimail.tu-dortmund.de",
+        "port": 993,
+        "user": "",
+        "pass": ""
+      }
+    }
   }
 }

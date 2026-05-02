@@ -26,6 +26,9 @@ export const DEFAULT_CONFIG = {
   telegram: {
     botToken: '',
   },
+  database: {
+    mongoUri: '',
+  },
   settings: {
     logLevel: 'info',
   },
@@ -37,6 +40,17 @@ export const DEFAULT_CONFIG = {
   tools: {
     weather: {
       googleApiKey: '',
+    },
+    email: {
+      enabled: false,
+      pollIntervalHours: 2,
+      notifyChatId: '',
+      imap: {
+        host: '',
+        port: 993,
+        user: '',
+        pass: '',
+      },
     },
   },
 };
@@ -96,6 +110,10 @@ export function mergeWithDefaults(config) {
       ...DEFAULT_CONFIG.telegram,
       ...(config.telegram || {}),
     },
+    database: {
+      ...DEFAULT_CONFIG.database,
+      ...(config.database || {}),
+    },
     settings: {
       ...DEFAULT_CONFIG.settings,
       ...(config.settings || {}),
@@ -110,6 +128,14 @@ export function mergeWithDefaults(config) {
       weather: {
         ...DEFAULT_CONFIG.tools?.weather,
         ...(config.tools?.weather || {}),
+      },
+      email: {
+        ...DEFAULT_CONFIG.tools?.email,
+        ...(config.tools?.email || {}),
+        imap: {
+          ...DEFAULT_CONFIG.tools?.email?.imap,
+          ...(config.tools?.email?.imap || {}),
+        },
       },
     },
   };

@@ -105,22 +105,47 @@ async function processBatch(client, range, mailbox) {
  * @param {Object} lock - Mailbox lock
  * @param {string} mailbox - Mailbox name
  * @param {number} totalMessages - Total number of messages in mailbox
+ * @param {string} [startDate] - Optional start date filter (ISO string)
  * @returns {Promise<number>} Highest UID processed
  */
-async function performFullSync(client, lock, mailbox, totalMessages) {
-  logger.info(`[Email Monitor] 🔄 Starting initial full sync (${totalMessages} emails)...`);
+async function performFullSync(client, lock, mailbox, totalMessages, startDate = null) {
+  let searchCriteria = { all: true };
+  let logMessage = `[Email Monitor] 🔄 Starting initial full sync (${totalMessages} emails)...`;
+
+  // If startDate is provided, use IMAP SEARCH to filter at server level
+  if (startDate) {
+    const sinceDate = new Date(startDate);
+    if (!isNaN(sinceDate.getTime())) {
+      searchCriteria = { since: sinceDate };
+      logMessage = `[Email Monitor] 🔄 Starting initial sync (emails since ${startDate})...`;
+    } else {
+      logger.warn(`[Email Monitor] Invalid startDate: ${startDate}, syncing all emails`);
+    }
+  }
+
+  logger.info(logMessage);
+
+  // Search for UIDs matching criteria
+  const uids = await client.search(searchCriteria, { uid: true });
+
+  if (!uids || uids.length === 0) {
+    logger.info('[Email Monitor] No emails found matching criteria');
+    return 0;
+  }
+
+  logger.info(`[Email Monitor] Found ${uids.length} emails to sync`);
 
   const BATCH_SIZE = 50;
-  let currentUID = 1;
   let highestUID = 0;
   let totalProcessed = 0;
   let totalImportant = 0;
 
-  while (currentUID <= totalMessages) {
-    const endUID = Math.min(currentUID + BATCH_SIZE - 1, totalMessages);
-    const range = `${currentUID}:${endUID}`;
+  // Process UIDs in batches
+  for (let i = 0; i < uids.length; i += BATCH_SIZE) {
+    const batchUIDs = uids.slice(i, Math.min(i + BATCH_SIZE, uids.length));
+    const range = `${batchUIDs[0]}:${batchUIDs[batchUIDs.length - 1]}`;
 
-    logger.info(`[Email Monitor] Processing batch: UIDs ${range} (${totalProcessed}/${totalMessages})`);
+    logger.info(`[Email Monitor] Processing batch: UIDs ${range} (${totalProcessed}/${uids.length})`);
 
     try {
       const { processedCount, highestUID: batchHighestUID, importantEmails } =
@@ -148,8 +173,6 @@ async function performFullSync(client, lock, mailbox, totalMessages) {
       logger.error(`[Email Monitor] Batch ${range} failed:`, batchErr.message);
       // Continue with next batch even if this one fails
     }
-
-    currentUID = endUID + 1;
   }
 
   logger.success(`[Email Monitor] ✅ Full sync complete: ${totalProcessed} emails, ${totalImportant} important`);
@@ -165,9 +188,10 @@ async function performFullSync(client, lock, mailbox, totalMessages) {
  * @param {string} imapConfig.user - IMAP username
  * @param {string} imapConfig.pass - IMAP password
  * @param {string} [mailbox='INBOX'] - Mailbox to check
+ * @param {string} [startDate] - Optional start date for initial sync (ISO string)
  * @returns {Promise<Array>} Array of important emails with classification
  */
-export async function checkNewEmails(imapConfig, mailbox = 'INBOX') {
+export async function checkNewEmails(imapConfig, mailbox = 'INBOX', startDate = null) {
   const { host, port, user, pass } = imapConfig;
 
   if (!host || !user || !pass) {
@@ -215,7 +239,7 @@ export async function checkNewEmails(imapConfig, mailbox = 'INBOX') {
       if (lastSeenUID === 0 && status.messages > 0) {
         logger.info(`[Email Monitor] 🆕 First run detected - performing full sync`);
 
-        const highestUID = await performFullSync(client, lock, mailbox, status.messages);
+        const highestUID = await performFullSync(client, lock, mailbox, status.messages, startDate);
 
         logger.success(`[Email Monitor] Initial sync complete - now in normal polling mode`);
 

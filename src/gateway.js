@@ -440,7 +440,11 @@ function startEmailPolling(sendMessage) {
     try {
       logger.info('[Email Monitor] Checking for new emails...');
 
-      const importantEmails = await checkNewEmails(emailConfig.imap);
+      const importantEmails = await checkNewEmails(
+        emailConfig.imap,
+        'INBOX',
+        emailConfig.startDate || null
+      );
 
       if (importantEmails.length > 0) {
         const notification = formatEmailNotification(importantEmails);
@@ -744,7 +748,11 @@ export async function handleMessage(params) {
           return 'Email IMAP configuration incomplete';
         }
 
-        const importantEmails = await checkNewEmails(emailConfig.imap);
+        const importantEmails = await checkNewEmails(
+          emailConfig.imap,
+          'INBOX',
+          emailConfig.startDate || null
+        );
         const notification = formatEmailNotification(importantEmails);
 
         return notification || 'No new important emails';

@@ -139,6 +139,7 @@ export async function checkStatus(mongoUri) {
     });
   }
 
+  logger.debug('[BeWatcher] Diff: ' + JSON.stringify(results, null, 2));
   return { ok: true, results, snapshot: baseline };
 }
 
@@ -163,7 +164,7 @@ export function formatStatusMessage(statusResult) {
   const lines = results.map(r => {
     const label = `${r.name} (${r.type})`;
     return r.isDown
-      ? `❌ ${label} — was: \`${r.expected}\` → now: \`${r.current}\``
+      ? `❌ ${label} — was: ${r.expected} → now: ${r.current}`
       : `✅ ${label} — ${r.current}`;
   });
 
@@ -171,7 +172,9 @@ export function formatStatusMessage(statusResult) {
   const header = allUp ? '✅ All services running' : '🚨 Service issues detected';
   const ts = new Date(snapshot.createdAt).toLocaleString();
 
-  return `${header}\n\n${lines.join('\n')}\n\n_Baseline: ${ts}_`;
+  const message = `${header}\n\n${lines.join('\n')}\n\nBaseline: ${ts}`;
+  logger.debug('[BeWatcher] Message: ' + message);
+  return message;
 }
 
 /**
@@ -181,9 +184,11 @@ export function formatStatusMessage(statusResult) {
  */
 export function formatAlertMessage(downItems) {
   const lines = downItems.map(r =>
-    `❌ ${r.name} (${r.type}) — was: \`${r.expected}\` → now: \`${r.current}\``,
+    `❌ ${r.name} (${r.type}) — was: ${r.expected} → now: ${r.current}`,
   );
-  return `🚨 *Service alert*\n\n${lines.join('\n')}`;
+  const message = `🚨 Service alert\n\n${lines.join('\n')}`;
+  logger.debug('[BeWatcher] Message: ' + message);
+  return message;
 }
 
 // ─── Watcher (cronjob) ───────────────────────────────────────────────────────
@@ -218,6 +223,7 @@ export function initBeWatcher(sendMessage, config) {
       return; // Skip first tick — no meaningful diff without a prior check
     }
     try {
+      logger.debug('[BeWatcher] Checking status...');
       const result = await checkStatus(mongoUri);
       if (!result.ok) {
         logger.info('[BeWatcher] Tick skipped:', result.reason);
@@ -226,7 +232,7 @@ export function initBeWatcher(sendMessage, config) {
       const down = result.results.filter(r => r.isDown);
       if (down.length > 0) {
         const msg = formatAlertMessage(down);
-        await sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+        await sendMessage(chatId, msg);
         logger.warn(`[BeWatcher] Alert sent — ${down.length} service(s) down`);
       }
     } catch (err) {

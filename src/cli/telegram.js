@@ -167,7 +167,9 @@ export async function connectCommand() {
       onCheckBe: async (ctx) => {
         try {
           const result = await checkStatus(config.database?.mongoUri);
-          await ctx.reply(formatStatusMessage(result), { parse_mode: 'Markdown' });
+          const msg = formatStatusMessage(result);
+          logger.debug('[BeWatcher] Replying with: ' + msg);
+          await ctx.reply(msg);
         } catch (err) {
           logger.error('Failed to check BE status:', err.message);
           await ctx.reply('❌ Failed to check service status.');

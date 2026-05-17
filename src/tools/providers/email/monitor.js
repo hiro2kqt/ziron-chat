@@ -112,15 +112,29 @@ async function performFullSync(client, lock, mailbox, totalMessages, startDate =
   let searchCriteria = { all: true };
   let logMessage = `[Email Monitor] 🔄 Starting initial full sync (${totalMessages} emails)...`;
 
+  // If no startDate provided, default to 7 days ago to prevent fetching entire inbox
+  if (!startDate) {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    startDate = sevenDaysAgo.toISOString().split('T')[0];
+    logger.info(`[Email Monitor] No startDate provided, defaulting to ${startDate} (7 days ago)`);
+  }
+
   // If startDate is provided, use IMAP SEARCH to filter at server level
   if (startDate) {
-    const sinceDate = new Date(startDate);
-    if (!isNaN(sinceDate.getTime())) {
-      searchCriteria = { since: sinceDate };
-      logMessage = `[Email Monitor] 🔄 Starting initial sync (emails since ${startDate})...`;
-    } else {
-      logger.warn(`[Email Monitor] Invalid startDate: ${startDate}, syncing all emails`);
+    let sinceDate = new Date(startDate);
+    
+    // Fallback to 7 days if invalid date
+    if (isNaN(sinceDate.getTime())) {
+      logger.warn(`[Email Monitor] Invalid startDate: ${startDate}. Defaulting to 7 days ago.`);
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      startDate = sevenDaysAgo.toISOString().split('T')[0];
+      sinceDate = new Date(startDate);
     }
+    
+    searchCriteria = { since: sinceDate };
+    logMessage = `[Email Monitor] 🔄 Starting initial sync (emails since ${startDate})...`;
   }
 
   logger.info(logMessage);
@@ -143,14 +157,12 @@ async function performFullSync(client, lock, mailbox, totalMessages, startDate =
   // Process UIDs in batches
   for (let i = 0; i < uids.length; i += BATCH_SIZE) {
     const batchUIDs = uids.slice(i, Math.min(i + BATCH_SIZE, uids.length));
-    // Use comma-separated UIDs, not range - only fetch the specific UIDs from search
-    const uidList = batchUIDs.join(',');
-
+    
     logger.info(`[Email Monitor] Processing batch: ${batchUIDs.length} UIDs (${totalProcessed}/${uids.length})`);
 
     try {
       const { processedCount, highestUID: batchHighestUID, importantEmails } =
-        await processBatch(client, uidList, mailbox);
+        await processBatch(client, batchUIDs, mailbox);
 
       totalProcessed += processedCount;
       totalImportant += importantEmails.length;
@@ -267,14 +279,21 @@ export async function checkNewEmails(imapConfig, mailbox = 'INBOX', startDate = 
         return [];
       }
 
-      // Update state with highest UID seen
-      await EmailState.findOneAndUpdate(
-        { mailbox },
-        {
-          lastSeenUID: highestUID,
-          lastCheckedAt: new Date(),
-        }
-      );
+      // Update state only if we actually saw a higher UID — never write 0 back
+      if (highestUID > lastSeenUID) {
+        await EmailState.findOneAndUpdate(
+          { mailbox },
+          {
+            lastSeenUID: highestUID,
+            lastCheckedAt: new Date(),
+          }
+        );
+      } else {
+        await EmailState.findOneAndUpdate(
+          { mailbox },
+          { lastCheckedAt: new Date() }
+        );
+      }
 
       logger.success(`[Email Monitor] Check complete. ${importantEmails.length} important email(s)`);
 

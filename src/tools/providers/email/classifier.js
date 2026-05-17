@@ -22,43 +22,52 @@ export async function classifyEmail(email) {
   const config = loadConfig();
   const apiKey = config.providers?.openrouter?.apiKey;
 
+  // Fix 3: surface missing API key — do not swallow, let gateway handle it
   if (!apiKey) {
     throw new Error('OpenRouter API key required for email classification');
   }
 
-  const { subject, from, snippet } = email;
+  const { subject, from } = email;
 
-  const prompt = `You are an email classifier for a university student. Classify if this email is IMPORTANT.
+  // Fix 4: explicit placeholder when snippet is empty so the model knows
+  const snippet = email.snippet?.trim() || '(no content available)';
 
-IMPORTANT emails are those related to university matters:
-- Deadlines (assignment due dates, registration deadlines, etc.)
-- Exams (schedules, locations, results)
-- Assignments (new assignments, clarifications, submissions)
-- Announcements (course updates, schedule changes, university events)
+  // Fix 2: improved prompt — language-aware, tighter category boundaries,
+  //         tiebreaker rules, no markdown fences in response
+  const prompt = `You are an email classifier for a university student at TU Dortmund.
+The emails may be written in German or English — always respond in English.
 
-NOT IMPORTANT:
-- Marketing emails
-- Social notifications
-- Newsletters
-- General spam
+Classify if this email is IMPORTANT based on these categories:
 
-EMAIL TO CLASSIFY:
+IMPORTANT — classify as one of:
+- "deadline": A specific due date is mentioned (registration, payment, form submission).
+  Do NOT use this for assignment submissions — use "assignment" instead.
+- "exam": Anything about exams (schedule, location, results, registration).
+- "assignment": New assignment released, submission due, or clarification about coursework.
+- "announcement": Official course or university update (room change, lecture cancelled, grade released, new course material).
+
+NOT IMPORTANT — classify as "other":
+- Marketing, newsletters, social notifications, automated system emails with no action required.
+
+Tiebreaker rules:
+- If an email mentions both a deadline AND an assignment → use "assignment"
+- If unsure between announcement and other → prefer "other"
+
 From: ${from}
 Subject: ${subject}
 Content: ${snippet}
 
-Respond in JSON format:
+Respond ONLY with valid JSON, no markdown fences, no explanation outside the JSON:
 {
-  "important": true/false,
-  "reason": "brief explanation why",
+  "important": true or false,
+  "reason": "one sentence in English explaining why",
   "category": "deadline/exam/assignment/announcement/other"
 }`;
 
   try {
-    // Use existing chat function with configured model
     const content = await chat(prompt, apiKey, {
       model: config.providers?.openrouter?.model,
-      maxTokens: 200,
+      maxTokens: 400, // Fix 1: raised from 200 to prevent mid-JSON truncation
       temperature: 0.3,
     });
 
@@ -66,34 +75,47 @@ Respond in JSON format:
       throw new Error('No response from classifier');
     }
 
-    // Extract JSON from response (might be wrapped in markdown)
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn('[Email Classifier] Could not parse JSON response:', content);
-      return {
-        important: false,
-        reason: 'Failed to parse classifier response',
-        category: 'other',
-      };
+    // Fix 3: log raw content on parse failure so it's visible in terminal
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      // Fix 2: prompt asks for no fences, but defensively try extracting anyway
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        logger.warn('[Email Classifier] Could not extract JSON. Raw response:\n', content);
+        return {
+          important: false,
+          reason: 'Failed to parse classifier response',
+          category: 'other',
+        };
+      }
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        logger.warn('[Email Classifier] JSON.parse failed. Raw response:\n', content);
+        return {
+          important: false,
+          reason: 'Failed to parse classifier response',
+          category: 'other',
+        };
+      }
     }
 
-    const result = JSON.parse(jsonMatch[0]);
-    logger.debug('[Email Classifier] Result:', result);
+    logger.debug('[Email Classifier] Result:', parsed);
 
     return {
-      important: result.important || false,
-      reason: result.reason || '',
-      category: result.category || 'other',
+      important: parsed.important || false,
+      reason:    parsed.reason    || '',
+      category:  parsed.category  || 'other',
     };
 
   } catch (err) {
+    // Fix 3: re-throw API-level errors (network, auth, rate limit) so the
+    //         caller (monitor.js) can decide whether to skip or abort the batch.
+    //         Only genuine parse failures above return a safe default.
     logger.error('[Email Classifier] Error:', err.message);
-    // Default to not important on error to avoid spamming
-    return {
-      important: false,
-      reason: `Classification error: ${err.message}`,
-      category: 'other',
-    };
+    throw err;
   }
 }
 

@@ -21,33 +21,10 @@ export function formatEmailNotification(emails) {
     return '';
   }
 
-  const categoryEmojis = {
-    deadline: '⏰',
-    exam: '📝',
-    assignment: '📚',
-    announcement: '📢',
-    other: '📧',
-  };
+  let message = `🔔 *${emails.length} new important email${emails.length > 1 ? 's' : ''}*\n`;
 
-  let message = `🔔 *${emails.length} Important Email${emails.length > 1 ? 's' : ''}*\n\n`;
-
-  emails.forEach((email, i) => {
-    const emoji = categoryEmojis[email.classification.category] || '📧';
-    message += `${emoji} *${email.subject}*\n`;
-    message += `👤 From: ${email.from}\n`;
-    message += `📂 Category: ${email.classification.category}\n`;
-    message += `💡 Why: ${email.classification.reason}\n`;
-
-    if (email.snippet && email.snippet.length > 0) {
-      const preview = email.snippet.length > 150
-        ? email.snippet.slice(0, 150) + '...'
-        : email.snippet;
-      message += `📄 Preview: ${preview}\n`;
-    }
-
-    if (i < emails.length - 1) {
-      message += '\n---\n\n';
-    }
+  emails.forEach(email => {
+    message += `- ${email.classification.reason}\n`;
   });
 
   return message;

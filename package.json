@@ -8,7 +8,7 @@
     "ziron": "./ziron.mjs"
   },
   "scripts": {
-    "start": "node ziron.mjs",
+    "start": "node ziron.mjs telegram connect",
     "dev": "node --watch ziron.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

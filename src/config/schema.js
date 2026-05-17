@@ -37,6 +37,10 @@ export const DEFAULT_CONFIG = {
     location: '',
     name: 'Hiro',
   },
+  beWatcher: {
+    intervalMinutes: 5,
+    chatId: '',
+  },
   tools: {
     weather: {
       googleApiKey: '',
@@ -117,6 +121,10 @@ export function mergeWithDefaults(config) {
     settings: {
       ...DEFAULT_CONFIG.settings,
       ...(config.settings || {}),
+    },
+    beWatcher: {
+      ...DEFAULT_CONFIG.beWatcher,
+      ...(config.beWatcher || {}),
     },
     user: {
       ...DEFAULT_CONFIG.user,

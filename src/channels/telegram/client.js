@@ -40,18 +40,6 @@ export function createClient(botToken) {
         return;
       }
 
-      // Default message handler
-      if (handlers.onMessage) {
-        bot.on('message:text', async (ctx) => {
-          try {
-            await handlers.onMessage(ctx);
-          } catch (err) {
-            logger.error('Message handler error:', err);
-            await ctx.reply('Sorry, an error occurred processing your message.');
-          }
-        });
-      }
-
       // Start command
       bot.command('start', async (ctx) => {
         await ctx.reply(
@@ -68,7 +56,9 @@ export function createClient(botToken) {
           '/help - Show this message\n' +
           '/ping - Test if bot is alive\n' +
           '/newsession - Start a new conversation\n' +
-          '/history - Show conversation info\n\n' +
+          '/model - Show current AI model\n' +
+          '/tasks - List all scheduled tasks\n' +
+          '/task_today - List today\'s tasks\n\n' +
           'Just send me any text message!'
         );
       });
@@ -82,19 +72,68 @@ export function createClient(botToken) {
         }
       });
 
-      // History command
-      bot.command('history', async (ctx) => {
-        if (handlers.onHistory) {
-          await handlers.onHistory(ctx);
-        } else {
-          await ctx.reply('Conversation history is available.');
-        }
-      });
-
       // Ping command
       bot.command('ping', async (ctx) => {
         await ctx.reply('🏓 Pong!');
       });
+
+      // Model command
+      bot.command('model', async (ctx) => {
+        if (handlers.onModel) {
+          await handlers.onModel(ctx);
+        } else {
+          await ctx.reply('🤖 Model info not available.');
+        }
+      });
+
+      // Tasks command
+      bot.command('tasks', async (ctx) => {
+        if (handlers.onTasks) {
+          await handlers.onTasks(ctx);
+        } else {
+          await ctx.reply('No tasks configured.');
+        }
+      });
+
+      // Task today command
+      bot.command('task_today', async (ctx) => {
+        if (handlers.onTaskToday) {
+          await handlers.onTaskToday(ctx);
+        } else {
+          await ctx.reply('No tasks for today.');
+        }
+      });
+
+      // Check BE command
+      bot.command('check_be', async (ctx) => {
+        if (handlers.onCheckBe) {
+          await handlers.onCheckBe(ctx);
+        } else {
+          await ctx.reply('BE watcher not available.');
+        }
+      });
+
+      // BE snapshot command
+      bot.command('be_snapshot', async (ctx) => {
+        if (handlers.onBeSnapshot) {
+          await handlers.onBeSnapshot(ctx);
+        } else {
+          await ctx.reply('BE snapshot not available.');
+        }
+      });
+
+      // Default message handler — registered after commands so commands take priority
+      if (handlers.onMessage) {
+        bot.on('message:text', async (ctx) => {
+          if (ctx.message?.text?.startsWith('/')) return;
+          try {
+            await handlers.onMessage(ctx);
+          } catch (err) {
+            logger.error('Message handler error:', err);
+            await ctx.reply('Sorry, an error occurred processing your message.');
+          }
+        });
+      }
 
       // Error handler
       bot.catch((err) => {
@@ -102,9 +141,29 @@ export function createClient(botToken) {
       });
 
       // Start polling
-      await bot.start();
-      isRunning = true;
-      logger.success('Telegram bot started');
+      await bot.start({
+        onStart: async () => {
+          isRunning = true;
+          logger.success('Telegram bot started');
+          try {
+            await bot.api.setMyCommands([]);
+            await bot.api.setMyCommands([
+              { command: 'start',      description: 'Start the bot' },
+              { command: 'help',       description: 'Show available commands' },
+              { command: 'newsession', description: 'Start a new conversation session' },
+              { command: 'ping',       description: 'Check if bot is alive' },
+              { command: 'model',      description: 'Show current AI model' },
+              { command: 'tasks',      description: 'List all scheduled tasks' },
+              { command: 'task_today', description: 'List today\'s tasks' },
+              { command: 'check_be',    description: 'Check PM2 and Docker status' },
+              { command: 'be_snapshot', description: 'Save current PM2 and Docker state as baseline' },
+            ]);
+            console.log('[ziron] Telegram commands registered');
+          } catch (err) {
+            logger.error('Failed to register commands:', err);
+          }
+        },
+      });
     },
 
     /**

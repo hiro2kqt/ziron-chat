@@ -8,10 +8,10 @@ import { createClient, validateBotToken } from '../channels/telegram/index.js';
 import { chat as openrouterChat } from '../providers/openrouter.js';
 import { chat as openaiChat } from '../providers/openai.js';
 import { chat as openaiCodexChat } from '../providers/openai-codex.js';
-import { handleMessage, resetSession, getSessionId, initScheduler, addOneshotJob, initEmailMonitoring } from '../gateway.js';
-import { loadSession } from '../storage/history.js';
+import { handleMessage, resetSession, initScheduler, addOneshotJob, initEmailMonitoring, listTodayJobs, listMasterJobs } from '../gateway.js';
 import { handleCallback } from '../scheduler/callbacks.js';
 import { handleInlineAction } from '../channels/telegram/actions.js';
+import { checkStatus, formatStatusMessage, initBeWatcher, takeSnapshot } from '../services/beWatcher.js';
 import logger from '../utils/logger.js';
 
 export async function connectCommand() {
@@ -43,6 +43,12 @@ export async function connectCommand() {
     : hasOpenAIOAuth ? 'openai-codex'
     : hasOpenAIKey ? 'openai'
     : null;
+
+  const activeModel = provider === 'openrouter'
+    ? config.providers.openrouter.model
+    : provider === 'openai' || provider === 'openai-codex'
+      ? config.providers.openai.model
+      : null;
 
   if (provider) {
     logger.info(`Using provider: ${provider}`);
@@ -114,30 +120,73 @@ export async function connectCommand() {
         }
       },
 
-      onHistory: async (ctx) => {
-        try {
-          const sessionId = getSessionId('telegram', ctx.chat.id);
+      onModel: async (ctx) => {
+        if (!activeModel) {
+          await ctx.reply('⚠️ No model configured.');
+          return;
+        }
+        await ctx.reply(`🤖 Current model: ${activeModel}`);
+      },
 
-          if (!sessionId) {
-            await ctx.reply('No active conversation yet. Send a message to start!');
+      onTasks: async (ctx) => {
+        try {
+          const jobs = await listMasterJobs(ctx.chat.id);
+          if (!jobs.length) {
+            await ctx.reply('No tasks configured.');
             return;
           }
+          const lines = jobs.map(j => {
+            const times = j.time_triggers.join(', ') || '—';
+            return `• ${j.name} [${times}]`;
+          });
+          await ctx.reply(`📋 Scheduled tasks:\n\n${lines.join('\n')}`);
+        } catch (err) {
+          logger.error('Failed to list tasks:', err.message);
+          await ctx.reply('❌ Failed to retrieve tasks.');
+        }
+      },
 
-          const messages = await loadSession(sessionId);
-          const userMessages = messages.filter(m => m.role === 'user').length;
-          const assistantMessages = messages.filter(m => m.role === 'assistant').length;
+      onTaskToday: async (ctx) => {
+        try {
+          const jobs = await listTodayJobs(ctx.chat.id);
+          if (!jobs.length) {
+            await ctx.reply('No tasks for today.');
+            return;
+          }
+          const lines = jobs.map(j => {
+            const status = j.fired ? '✅' : '⏳';
+            return `${status} ${j.name} @ ${j.fire_at}`;
+          });
+          await ctx.reply(`📅 Today's tasks:\n\n${lines.join('\n')}`);
+        } catch (err) {
+          logger.error('Failed to list today tasks:', err.message);
+          await ctx.reply('❌ Failed to retrieve today\'s tasks.');
+        }
+      },
 
+      onCheckBe: async (ctx) => {
+        try {
+          const result = await checkStatus(config.database?.mongoUri);
+          await ctx.reply(formatStatusMessage(result), { parse_mode: 'Markdown' });
+        } catch (err) {
+          logger.error('Failed to check BE status:', err.message);
+          await ctx.reply('❌ Failed to check service status.');
+        }
+      },
+
+      onBeSnapshot: async (ctx) => {
+        try {
+          const doc = await takeSnapshot(config.database?.mongoUri);
+          const ts = new Date(doc.createdAt).toLocaleString();
           await ctx.reply(
-            `📊 Conversation Stats:\n\n` +
-            `Session ID: ${sessionId.substring(0, 8)}...\n` +
-            `Total messages: ${messages.length}\n` +
-            `Your messages: ${userMessages}\n` +
-            `Bot responses: ${assistantMessages}\n\n` +
-            `Use /newsession to start fresh.`
+            `📸 Snapshot saved\n\n` +
+            `PM2 processes: ${doc.pm2.length}\n` +
+            `Docker containers: ${doc.docker.length}\n` +
+            `Saved at: ${ts}`,
           );
         } catch (err) {
-          logger.error('Failed to get history:', err.message);
-          await ctx.reply('❌ Failed to retrieve conversation history.');
+          logger.error('Failed to take BE snapshot:', err.message);
+          await ctx.reply('❌ Failed to take snapshot.');
         }
       },
     };
@@ -166,6 +215,14 @@ export async function connectCommand() {
     } catch (err) {
       logger.error('Email monitoring initialization failed:', err.message);
       logger.warn('Bot will continue without email monitoring');
+    }
+
+    // Start BE watcher
+    try {
+      initBeWatcher(sendMessage, config);
+    } catch (err) {
+      logger.error('BE watcher initialization failed:', err.message);
+      logger.warn('Bot will continue without BE watcher');
     }
 
     // Register callback query handler for scheduler buttons

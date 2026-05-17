@@ -60,8 +60,9 @@ async function processBatch(client, uidList, mailbox) {
     });
 
     // Save to MongoDB
+    let alreadyExisted = false;
     try {
-      await Email.findOneAndUpdate(
+      const upsertResult = await Email.findOneAndUpdate(
         { mailbox, uid: email.uid },
         {
           uid: email.uid,
@@ -74,19 +75,22 @@ async function processBatch(client, uidList, mailbox) {
           category: classification.category,
           summary: classification.reason,
         },
-        { upsert: true, new: true }
+        { upsert: true, includeResultMetadata: true }
       );
-      logger.debug(`[Email Monitor] Saved email UID ${email.uid} to MongoDB`);
+      alreadyExisted = upsertResult.lastErrorObject?.updatedExisting === true;
+      logger.debug(`[Email Monitor] Saved email UID ${email.uid} to MongoDB (alreadyExisted: ${alreadyExisted})`);
     } catch (saveErr) {
       logger.error(`[Email Monitor] Failed to save email UID ${email.uid}:`, saveErr.message);
     }
 
-    if (classification.important) {
+    if (classification.important && !alreadyExisted) {
       importantEmails.push({
         ...email,
         classification,
       });
       logger.info(`[Email Monitor] ⚠️  Important: ${email.subject} (${classification.category})`);
+    } else if (classification.important && alreadyExisted) {
+      logger.debug(`[Email Monitor] Skipping notification for already-processed UID ${email.uid}: ${email.subject}`);
     } else {
       logger.debug(`[Email Monitor] Not important: ${email.subject}`);
     }

@@ -398,7 +398,7 @@ class OpenRouterProviderAdapter {
  * Get active chat IDs from session map
  * @returns {Array<string>} Array of chat IDs
  */
-function getActiveChatIds() {
+export function getActiveChatIds() {
   const chatIds = [];
 
   for (const [channelKey, sessionId] of gatewayState.sessionMap.entries()) {

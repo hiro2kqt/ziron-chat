@@ -39,7 +39,6 @@ export const DEFAULT_CONFIG = {
   },
   beWatcher: {
     intervalMinutes: 5,
-    chatId: '',
   },
   tools: {
     weather: {

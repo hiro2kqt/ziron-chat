@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { connectMongo } from '../db/mongo.js';
 import BeSnapshot from '../db/models/BeSnapshot.js';
+import { getActiveChatIds } from '../gateway.js';
 import logger from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -129,7 +130,7 @@ export async function checkStatus(mongoUri) {
   for (const expected of baseline.docker) {
     const current = currentDocker.find(c => c.name === expected.name);
     const currentStatus = current?.status ?? 'missing';
-    const isDown = !current || !currentStatus.startsWith('Up');
+    const isDown = !current || !currentStatus.startsWith('Up') || currentStatus.includes('(unhealthy)');
     results.push({
       name:     expected.name,
       type:     'docker',
@@ -178,15 +179,15 @@ export function formatStatusMessage(statusResult) {
 }
 
 /**
- * Format a short alert message for down services (used by cronjob).
+ * Format a short alert message for down/unhealthy services (used by cronjob).
  * @param {Array} downItems — filtered results where isDown === true
  * @returns {string}
  */
 export function formatAlertMessage(downItems) {
   const lines = downItems.map(r =>
-    `❌ ${r.name} (${r.type}) — was: ${r.expected} → now: ${r.current}`,
+    `❌ ${r.name} (${r.type}) — ${r.current}`,
   );
-  const message = `🚨 Service alert\n\n${lines.join('\n')}`;
+  const message = `⚠️ Service alert\n\n${lines.join('\n')}`;
   logger.debug('[BeWatcher] Message: ' + message);
   return message;
 }
@@ -201,14 +202,8 @@ export function formatAlertMessage(downItems) {
  * @param {Object} config — full ziron config
  */
 export function initBeWatcher(sendMessage, config) {
-  const chatId = config.beWatcher?.chatId;
   const intervalMinutes = config.beWatcher?.intervalMinutes ?? 5;
   const mongoUri = config.database?.mongoUri;
-
-  if (!chatId) {
-    logger.warn('[BeWatcher] beWatcher.chatId not configured — alerts disabled');
-    return;
-  }
 
   if (!mongoUri) {
     logger.warn('[BeWatcher] No MongoDB URI — BE watcher cannot run');
@@ -232,8 +227,15 @@ export function initBeWatcher(sendMessage, config) {
       const down = result.results.filter(r => r.isDown);
       if (down.length > 0) {
         const msg = formatAlertMessage(down);
-        await sendMessage(chatId, msg);
-        logger.warn(`[BeWatcher] Alert sent — ${down.length} service(s) down`);
+        const chatIds = getActiveChatIds();
+        if (chatIds.length === 0) {
+          logger.warn('[BeWatcher] No active chats to send alert to');
+          return;
+        }
+        for (const chatId of chatIds) {
+          await sendMessage(chatId, msg);
+        }
+        logger.warn(`[BeWatcher] Alert sent to ${chatIds.length} chat(s) — ${down.length} service(s) down`);
       }
     } catch (err) {
       logger.error('[BeWatcher] Tick error:', err.message);
@@ -242,5 +244,5 @@ export function initBeWatcher(sendMessage, config) {
 
   const intervalMs = intervalMinutes * 60 * 1000;
   setInterval(tick, intervalMs);
-  logger.info(`[BeWatcher] Watcher started — checking every ${intervalMinutes}m`);
+  logger.info(`[BeWatcher] Watcher started — interval: ${intervalMinutes} min`);
 }

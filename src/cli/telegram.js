@@ -3,7 +3,8 @@
  * Start bot, status, test commands
  */
 
-import { loadConfig } from '../config/index.js';
+import { loadConfig, getForcedChatId } from '../config/index.js';
+import { setReplyConfig, replyTo, typingTo } from '../channels/telegram/reply.js';
 import { createClient, validateBotToken } from '../channels/telegram/index.js';
 import { chat as openrouterChat } from '../providers/openrouter.js';
 import { chat as openaiChat } from '../providers/openai.js';
@@ -11,6 +12,8 @@ import { chat as openaiCodexChat } from '../providers/openai-codex.js';
 import { handleMessage, resetSession, initScheduler, addOneshotJob, initEmailMonitoring, listTodayJobs, listMasterJobs } from '../gateway.js';
 import { handleCallback } from '../scheduler/callbacks.js';
 import { handleInlineAction } from '../channels/telegram/actions.js';
+import { createAuthMiddleware } from '../channels/telegram/auth.js';
+import { startVoiceServer } from '../channels/voice/server.js';
 import { checkStatus, formatStatusMessage, initBeWatcher, takeSnapshot } from '../services/beWatcher.js';
 import logger from '../utils/logger.js';
 
@@ -18,12 +21,28 @@ export async function connectCommand() {
   logger.info('🤖 Starting Telegram bot...\n');
 
   const config = loadConfig();
+  setReplyConfig(config);
 
   if (!config.telegram.botToken) {
     logger.error('Missing Telegram bot token');
     logger.info('Get a token from @BotFather on Telegram');
     logger.info('Then add to .env: TELEGRAM_BOT_TOKEN=your_token');
     process.exit(1);
+  }
+
+  // Warn when no allowlist is configured (risk C1: any user can reach the bot)
+  const allowedUserIds = config.telegram.allowedUserIds ?? [];
+  if (allowedUserIds.length === 0) {
+    logger.warn('[Auth] telegram.allowedUserIds is empty — bot will respond to ANY Telegram user.');
+    logger.warn('[Auth] Set allowedUserIds in config.json to restrict access (see docs/audit/RISKS.md#C1).');
+  } else {
+    logger.info(`[Auth] Allowlist active: ${allowedUserIds.length} user(s) permitted.`);
+  }
+
+  // Forced outbound destination — null means reply to the originating chat (default behavior)
+  const forcedChatId = getForcedChatId(config);
+  if (forcedChatId) {
+    logger.info(`[Routing] Forced outbound chatId: ${forcedChatId}`);
   }
 
   // Check which provider is configured
@@ -58,7 +77,11 @@ export async function connectCommand() {
   }
 
   try {
-    const client = createClient(config.telegram.botToken);
+    const client = createClient(config.telegram.botToken, config.telegram.apiRoot);
+
+    // Register authorization middleware FIRST — before any command, message,
+    // or callback handler — so no downstream work is done for unauthorized users
+    client.bot.use(createAuthMiddleware(config));
 
     // Get bot info
     const me = await client.getMe();
@@ -70,17 +93,14 @@ export async function connectCommand() {
     const handlers = {
       onMessage: async (ctx) => {
         const text = ctx.message.text;
-        const from = ctx.from.username || ctx.from.first_name;
-
-        logger.info(`[${from}]: ${text}`);
 
         if (!provider) {
-          await ctx.reply('⚠️ No AI provider configured. Cannot respond.');
+          await replyTo(ctx, '⚠️ No AI provider configured. Cannot respond.');
           return;
         }
 
         // Send typing indicator
-        await ctx.replyWithChatAction('typing');
+        await typingTo(ctx);
 
         try {
           // Use gateway to handle message with conversation history
@@ -94,18 +114,18 @@ export async function connectCommand() {
 
           try {
             if (response && response.trim() !== '') {
-              await ctx.reply(response, { parse_mode: 'Markdown' });
+              await replyTo(ctx, response, { parse_mode: 'Markdown' });
             }
           } catch (err) {
             logger.warn('Markdown parse failed, sending plain text');
             if (response && response.trim() !== '') {
-              await ctx.reply(response);
+              await replyTo(ctx, response);
             }
           }
 
         } catch (err) {
           logger.error('Gateway error:', err.message);
-          await ctx.reply('❌ Sorry, I encountered an error generating a response.');
+          await replyTo(ctx, '❌ Sorry, I encountered an error generating a response.');
         }
       },
 
@@ -113,36 +133,36 @@ export async function connectCommand() {
         try {
           const sessionId = resetSession('telegram', ctx.chat.id);
           logger.info(`New session created for chat ${ctx.chat.id}: ${sessionId}`);
-          await ctx.reply('✨ Started a new conversation! Previous messages have been cleared.');
+          await replyTo(ctx, '✨ Started a new conversation! Previous messages have been cleared.');
         } catch (err) {
           logger.error('Failed to create new session:', err.message);
-          await ctx.reply('❌ Failed to create new session.');
+          await replyTo(ctx, '❌ Failed to create new session.');
         }
       },
 
       onModel: async (ctx) => {
         if (!activeModel) {
-          await ctx.reply('⚠️ No model configured.');
+          await replyTo(ctx, '⚠️ No model configured.');
           return;
         }
-        await ctx.reply(`🤖 Current model: ${activeModel}`);
+        await replyTo(ctx, `🤖 Current model: ${activeModel}`);
       },
 
       onTasks: async (ctx) => {
         try {
           const jobs = await listMasterJobs(ctx.chat.id);
           if (!jobs.length) {
-            await ctx.reply('No tasks configured.');
+            await replyTo(ctx, 'No tasks configured.');
             return;
           }
           const lines = jobs.map(j => {
             const times = j.time_triggers.join(', ') || '—';
             return `• ${j.name} [${times}]`;
           });
-          await ctx.reply(`📋 Scheduled tasks:\n\n${lines.join('\n')}`);
+          await replyTo(ctx, `📋 Scheduled tasks:\n\n${lines.join('\n')}`);
         } catch (err) {
           logger.error('Failed to list tasks:', err.message);
-          await ctx.reply('❌ Failed to retrieve tasks.');
+          await replyTo(ctx, '❌ Failed to retrieve tasks.');
         }
       },
 
@@ -150,17 +170,17 @@ export async function connectCommand() {
         try {
           const jobs = await listTodayJobs(ctx.chat.id);
           if (!jobs.length) {
-            await ctx.reply('No tasks for today.');
+            await replyTo(ctx, 'No tasks for today.');
             return;
           }
           const lines = jobs.map(j => {
             const status = j.fired ? '✅' : '⏳';
             return `${status} ${j.name} @ ${j.fire_at}`;
           });
-          await ctx.reply(`📅 Today's tasks:\n\n${lines.join('\n')}`);
+          await replyTo(ctx, `📅 Today's tasks:\n\n${lines.join('\n')}`);
         } catch (err) {
           logger.error('Failed to list today tasks:', err.message);
-          await ctx.reply('❌ Failed to retrieve today\'s tasks.');
+          await replyTo(ctx, '❌ Failed to retrieve today\'s tasks.');
         }
       },
 
@@ -169,10 +189,10 @@ export async function connectCommand() {
           const result = await checkStatus(config.database?.mongoUri);
           const msg = formatStatusMessage(result);
           logger.debug('[BeWatcher] Replying with: ' + msg);
-          await ctx.reply(msg);
+          await replyTo(ctx, msg);
         } catch (err) {
           logger.error('Failed to check BE status:', err.message);
-          await ctx.reply('❌ Failed to check service status.');
+          await replyTo(ctx, '❌ Failed to check service status.');
         }
       },
 
@@ -180,7 +200,7 @@ export async function connectCommand() {
         try {
           const doc = await takeSnapshot(config.database?.mongoUri);
           const ts = new Date(doc.createdAt).toLocaleString();
-          await ctx.reply(
+          await replyTo(ctx,
             `📸 Snapshot saved\n\n` +
             `PM2 processes: ${doc.pm2.length}\n` +
             `Docker containers: ${doc.docker.length}\n` +
@@ -188,17 +208,19 @@ export async function connectCommand() {
           );
         } catch (err) {
           logger.error('Failed to take BE snapshot:', err.message);
-          await ctx.reply('❌ Failed to take snapshot.');
+          await replyTo(ctx, '❌ Failed to take snapshot.');
         }
       },
     };
 
-    // Initialize scheduler before bot starts
+    // Initialize scheduler before bot starts.
+    // When forcedChatId is set, ALL outbound messages (scheduler, email, beWatcher)
+    // are redirected to that destination regardless of the chatId stored in the job.
     const sendMessage = async (chatId, text, options = {}) => {
       if (!text || text.trim() === '') {
         return; // Don't send empty messages
       }
-      await client.sendMessage(chatId, text, {
+      await client.sendMessage(forcedChatId ?? chatId, text, {
         parse_mode: 'Markdown',
         ...options,
       });
@@ -227,10 +249,17 @@ export async function connectCommand() {
       logger.warn('Bot will continue without BE watcher');
     }
 
+    // Start voice channel server (REST chat + SSE reminders for the browser dashboard).
+    // Runs in this same process so it can receive the scheduler's "job due" push above.
+    try {
+      startVoiceServer();
+    } catch (err) {
+      logger.error('Voice server initialization failed:', err.message);
+      logger.warn('Bot will continue without the voice channel');
+    }
+
     // Register callback query handler for scheduler buttons
     client.bot.on('callback_query:data', async (ctx) => {
-      const from = ctx.from.username || ctx.from.first_name;
-      logger.info(`[Telegram IN] Button clicked by ${from}: ${ctx.callbackQuery.data}`);
       try {
         const handled = await handleInlineAction(ctx);
         if (handled) return;
@@ -265,7 +294,7 @@ export async function statusCommand() {
   logger.info('Checking bot token...');
 
   try {
-    const me = await validateBotToken(config.telegram.botToken);
+    const me = await validateBotToken(config.telegram.botToken, config.telegram.apiRoot);
 
     if (me) {
       logger.success('Bot token valid!\n');
@@ -304,7 +333,7 @@ export async function testCommand() {
   try {
     // Test Telegram
     logger.info('1. Testing Telegram bot token...');
-    const me = await validateBotToken(config.telegram.botToken);
+    const me = await validateBotToken(config.telegram.botToken, config.telegram.apiRoot);
 
     if (!me) {
       logger.error('   Invalid bot token');

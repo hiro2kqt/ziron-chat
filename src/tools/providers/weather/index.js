@@ -72,7 +72,7 @@ export async function getWeather({ city, lat, lon }) {
 }
 
 /**
- * Format weather data to Vietnamese text
+ * Format weather data to English text
  * @param {Object} result - Weather result from getWeather()
  * @returns {string} Formatted weather text
  */
@@ -94,8 +94,8 @@ export function formatWeather(result) {
 
   // Format date time from ISO string
   const date = new Date(time);
-  const dateStr = date.toLocaleDateString("vi-VN");
-  const timeStr = date.toLocaleTimeString("vi-VN", {
+  const dateStr = date.toLocaleDateString("en-US");
+  const timeStr = date.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
   });
@@ -103,38 +103,37 @@ export function formatWeather(result) {
   // Determine weather emoji based on condition
   let emoji = "🌤";
   const conditionLower = condition.toLowerCase();
-  if (conditionLower.includes("mưa")) emoji = "🌧";
-  else if (conditionLower.includes("nắng")) emoji = "☀️";
-  else if (conditionLower.includes("mây")) emoji = "☁️";
-  else if (conditionLower.includes("nhiều mây")) emoji = "🌤";
+  if (conditionLower.includes("rain")) emoji = "🌧";
+  else if (conditionLower.includes("sun") || conditionLower.includes("clear")) emoji = "☀️";
+  else if (conditionLower.includes("cloud")) emoji = "☁️";
 
-  // Map wind direction to Vietnamese abbreviations
+  // Map wind direction to standard compass abbreviations
   const windDirectionMap = {
-    NORTH: "B",
-    NORTH_NORTHEAST: "BBĐ",
-    NORTHEAST: "BĐ",
-    EAST_NORTHEAST: "ĐBĐ",
-    EAST: "Đ",
-    EAST_SOUTHEAST: "ĐNĐ",
-    SOUTHEAST: "NĐ",
-    SOUTH_SOUTHEAST: "NNĐ",
-    SOUTH: "N",
-    SOUTH_SOUTHWEST: "NTN",
-    SOUTHWEST: "TN",
-    WEST_SOUTHWEST: "TTN",
-    WEST: "T",
-    WEST_NORTHWEST: "TTB",
-    NORTHWEST: "TB",
-    NORTH_NORTHWEST: "BTB",
+    NORTH: "N",
+    NORTH_NORTHEAST: "NNE",
+    NORTHEAST: "NE",
+    EAST_NORTHEAST: "ENE",
+    EAST: "E",
+    EAST_SOUTHEAST: "ESE",
+    SOUTHEAST: "SE",
+    SOUTH_SOUTHEAST: "SSE",
+    SOUTH: "S",
+    SOUTH_SOUTHWEST: "SSW",
+    SOUTHWEST: "SW",
+    WEST_SOUTHWEST: "WSW",
+    WEST: "W",
+    WEST_NORTHWEST: "WNW",
+    NORTHWEST: "NW",
+    NORTH_NORTHWEST: "NNW",
   };
 
   const windDir = windDirectionMap[wind?.direction] || wind?.direction || "—";
 
-  return `Thời tiết tại ${locationName} (${lat.toFixed(4)}, ${lon.toFixed(4)}):
-${emoji} ${condition} — ${temp}°C, cảm giác như ${feelsLike}°C
-💧 Độ ẩm: ${humidity}% | 🌧 Khả năng mưa: ${rainChance}%
-💨 Gió: ${wind.speed} km/h hướng ${windDir} | ☁️ Mây: ${cloudCover}%
-🕐 Cập nhật: ${dateStr} ${timeStr}`;
+  return `Weather in ${locationName} (${lat.toFixed(4)}, ${lon.toFixed(4)}):
+${emoji} ${condition} — ${temp}°C, feels like ${feelsLike}°C
+💧 Humidity: ${humidity}% | 🌧 Chance of rain: ${rainChance}%
+💨 Wind: ${wind.speed} km/h from ${windDir} | ☁️ Cloud cover: ${cloudCover}%
+🕐 Updated: ${dateStr} ${timeStr}`;
 }
 
 // Test block

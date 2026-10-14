@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
-import { loadConfig } from './config/index.js';
+import { loadConfig, getForcedChatId } from './config/index.js';
 import { createSession, appendMessage, buildApiMessages } from './storage/history.js';
 import { createClient } from './api/client.js';
 import { buildSystemPrompt } from './prompts/system.js';
@@ -383,8 +383,13 @@ class OpenRouterProviderAdapter {
       };
     }
 
-    // No tool calls, return text content
-    const messageContent = message.content || '';
+    // No tool calls, return text content.
+    // Some reasoning models (e.g. qwen3.5) leak chain-of-thought inline in `content`
+    // as <think>...</think>, sometimes missing the opening tag — strip both cases.
+    const messageContent = (message.content || '')
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/^[\s\S]*?<\/think>/i, '')
+      .trim();
     logger.info(`[LLM IN] OpenRouter trả lời: ${messageContent.substring(0, 100)}...`);
 
     return {
@@ -449,22 +454,30 @@ function startEmailPolling(sendMessage) {
       if (importantEmails.length > 0) {
         const notification = formatEmailNotification(importantEmails);
 
-        // Send to all active Telegram chats
-        const chatIds = getActiveChatIds();
-
-        if (chatIds.length === 0) {
-          logger.warn('[Email Monitor] No active chats to send notification to');
-          return;
-        }
-
-        for (const chatId of chatIds) {
+        // Send to forced destination or all active chats.
+        // When forced, send exactly once — the loop would otherwise send N
+        // identical copies to the same destination.
+        const forced = getForcedChatId(gatewayState.config);
+        if (forced) {
           try {
-            await sendMessage(chatId, notification, {
-              parse_mode: 'Markdown',
-            });
-            logger.success(`[Email Monitor] Sent notification to chat ${chatId}`);
+            await sendMessage(forced, notification, { parse_mode: 'Markdown' });
+            logger.success(`[Email Monitor] Sent notification to forced chat ${forced}`);
           } catch (sendErr) {
-            logger.error(`[Email Monitor] Failed to send to chat ${chatId}:`, sendErr.message);
+            logger.error(`[Email Monitor] Failed to send to forced chat ${forced}:`, sendErr.message);
+          }
+        } else {
+          const chatIds = getActiveChatIds();
+          if (chatIds.length === 0) {
+            logger.warn('[Email Monitor] No active chats to send notification to');
+            return;
+          }
+          for (const chatId of chatIds) {
+            try {
+              await sendMessage(chatId, notification, { parse_mode: 'Markdown' });
+              logger.success(`[Email Monitor] Sent notification to chat ${chatId}`);
+            } catch (sendErr) {
+              logger.error(`[Email Monitor] Failed to send to chat ${chatId}:`, sendErr.message);
+            }
           }
         }
 
@@ -637,7 +650,10 @@ export async function handleMessage(params) {
       location: gatewayState.config?.user?.location || '',
       timezone: gatewayState.config?.user?.timezone || '',
       availableTools: ['scheduler', 'weather', 'email', 'query_emails'],
-      chatId: channelId,
+      // Scheduler/reminder delivery is always Telegram, regardless of which channel
+      // (voice, telegram, ...) the request came in on, so this must resolve to the
+      // configured owner's Telegram chat ID, not the per-channel session ID.
+      chatId: getForcedChatId(gatewayState.config) || channelId,
       refId,
     },
     // includeMemory: true is default

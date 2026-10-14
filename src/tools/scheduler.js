@@ -235,18 +235,18 @@ export function calculateRecurringDays({ expression }) {
   };
 
   const dayNames = [
-    'Chủ nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'
+    'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
   ];
 
   // Handle special cases
   if (expr === 'mỗi ngày' || expr === 'hàng ngày' || expr === 'every day' || expr === 'everyday') {
-    return { days: [], description: 'Mỗi ngày' };
+    return { days: [], description: 'Every day' };
   }
   if (expr === 'ngày trong tuần' || expr === 'weekdays') {
-    return { days: [1, 2, 3, 4, 5], description: 'Ngày trong tuần (Thứ 2-6)' };
+    return { days: [1, 2, 3, 4, 5], description: 'Weekdays (Mon-Fri)' };
   }
   if (expr === 'cuối tuần' || expr === 'weekend') {
-    return { days: [0, 6], description: 'Cuối tuần (Thứ 7, Chủ nhật)' };
+    return { days: [0, 6], description: 'Weekend (Sat, Sun)' };
   }
 
   // Handle ranges: "thứ 2 đến thứ 6" or "monday to friday"
@@ -618,14 +618,14 @@ export function getSchedulerTools() {
     },
     {
       name: 'calculateSpecificDates',
-      description: 'Tính danh sách ngày cụ thể từ mô tả tự nhiên. PHẢI dùng tool này, không được tự tính. Trả về mảng chuỗi YYYY-MM-DD.',
+      description: 'Calculate specific dates from a natural-language description. MUST use this tool, do not calculate dates yourself. Returns an array of YYYY-MM-DD strings.',
       input_schema: {
         type: 'object',
         properties: {
           dates: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Mô tả từng ngày. Ví dụ: ["ngày 26/4", "ngày 27/4"], ["ngày mai", "2 ngày nữa"], ["10 ngày nữa"]',
+            description: 'Description of each date. Examples: ["April 26", "April 27"], ["tomorrow", "in 2 days"], ["in 10 days"]',
           },
           timezone: {
             type: 'string',
@@ -794,12 +794,12 @@ export function getSchedulerTools() {
           repeatDays: {
             type: 'array',
             items: { type: 'number' },
-            description: 'Days of week (0=Sun, 1=Mon...). Empty array = every day. Bỏ trống [] nếu dùng specificDates.',
+            description: 'Days of week (0=Sun, 1=Mon...). Empty array = every day. Leave empty [] if using specificDates.',
           },
           specificDates: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Danh sách ngày cụ thể ISO format YYYY-MM-DD (UTC). Nếu có, job chỉ chạy đúng các ngày này, bỏ qua repeatDays.',
+            description: 'List of specific dates, ISO format YYYY-MM-DD (UTC). If provided, the job only runs on these exact dates, ignoring repeatDays.',
           },
           timeTriggers: {
             type: 'array',
@@ -872,7 +872,7 @@ export function getSchedulerTools() {
     },
     {
       name: 'listMasterJobs',
-      description: 'Liệt kê tất cả master jobs (recurring jobs) của user. Trả về danh sách job bao gồm repeat_days, specific_dates, và time_triggers.',
+      description: 'List all master jobs (recurring jobs) for the user. Returns a list of jobs including repeat_days, specific_dates, and time_triggers.',
       input_schema: {
         type: 'object',
         properties: {

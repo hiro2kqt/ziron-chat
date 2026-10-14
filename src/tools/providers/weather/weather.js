@@ -25,7 +25,7 @@ export async function fetchWeather({ lat, lon, apiKey }) {
   url.searchParams.append("key", apiKey);
   url.searchParams.append("location.latitude", lat);
   url.searchParams.append("location.longitude", lon);
-  url.searchParams.append("languageCode", "vi");
+  url.searchParams.append("languageCode", "en");
   url.searchParams.append("unitsSystem", "METRIC");
 
   try {
@@ -40,7 +40,7 @@ export async function fetchWeather({ lat, lon, apiKey }) {
 
     return {
       time: data.currentTime,
-      condition: data.weatherCondition?.description?.text || "Không rõ",
+      condition: data.weatherCondition?.description?.text || "Unknown",
       temp: data.temperature?.degrees,
       feelsLike: data.feelsLikeTemperature?.degrees,
       humidity: data.relativeHumidity,

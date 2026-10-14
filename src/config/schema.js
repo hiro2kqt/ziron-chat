@@ -25,6 +25,10 @@ export const DEFAULT_CONFIG = {
   },
   telegram: {
     botToken: '',
+    chatId: '',
+    allowedUserIds: [],
+    // empty = official api.telegram.org (grammY default). Set to a local Bot API server URL, e.g. http://localhost:8082
+    apiRoot: '',
   },
   database: {
     mongoUri: '',

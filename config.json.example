@@ -8,7 +8,10 @@
     }
   },
   "telegram": {
-    "botToken": ""
+    "botToken": "",
+    "chatId": "",
+    "allowedUserIds": [],
+    "apiRoot": ""
   },
   "database": {
     "mongoUri": "mongodb://localhost:27017/ziron"
@@ -28,7 +31,6 @@
     "email": {
       "enabled": false,
       "pollIntervalHours": 2,
-      "notifyChatId": "",
       "imap": {
         "host": "unimail.tu-dortmund.de",
         "port": 993,

@@ -101,8 +101,24 @@ export function loadConfig() {
     config.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
   }
 
-  // Merge with defaults
-  return mergeWithDefaults(config);
+  // Merge with defaults then normalize telegram IDs to strings.
+  // Telegram user/group IDs exceed 32-bit; never coerce with Number() or parseInt.
+  const cfg = mergeWithDefaults(config);
+  cfg.telegram.chatId = cfg.telegram.chatId ? String(cfg.telegram.chatId) : '';
+  cfg.telegram.allowedUserIds = (cfg.telegram.allowedUserIds ?? []).map(String);
+  return cfg;
+}
+
+/**
+ * Return the forced outbound chat destination, or null when unset.
+ * All callers must use this instead of reading config.telegram.chatId directly.
+ *
+ * @param {Object} config - Full ziron config (already normalized by loadConfig)
+ * @returns {string|null}
+ */
+export function getForcedChatId(config) {
+  const id = config?.telegram?.chatId;
+  return id ? String(id) : null;
 }
 
 /**

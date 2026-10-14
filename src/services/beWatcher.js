@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { connectMongo } from '../db/mongo.js';
 import BeSnapshot from '../db/models/BeSnapshot.js';
 import { getActiveChatIds } from '../gateway.js';
+import { getForcedChatId } from '../config/index.js';
 import logger from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -227,15 +228,23 @@ export function initBeWatcher(sendMessage, config) {
       const down = result.results.filter(r => r.isDown);
       if (down.length > 0) {
         const msg = formatAlertMessage(down);
-        const chatIds = getActiveChatIds();
-        if (chatIds.length === 0) {
-          logger.warn('[BeWatcher] No active chats to send alert to');
-          return;
+        // When forced, send exactly once — the loop would otherwise send N
+        // identical copies to the same destination.
+        const forced = getForcedChatId(config);
+        if (forced) {
+          await sendMessage(forced, msg);
+          logger.warn(`[BeWatcher] Alert sent to forced chat ${forced} — ${down.length} service(s) down`);
+        } else {
+          const chatIds = getActiveChatIds();
+          if (chatIds.length === 0) {
+            logger.warn('[BeWatcher] No active chats to send alert to');
+            return;
+          }
+          for (const chatId of chatIds) {
+            await sendMessage(chatId, msg);
+          }
+          logger.warn(`[BeWatcher] Alert sent to ${chatIds.length} chat(s) — ${down.length} service(s) down`);
         }
-        for (const chatId of chatIds) {
-          await sendMessage(chatId, msg);
-        }
-        logger.warn(`[BeWatcher] Alert sent to ${chatIds.length} chat(s) — ${down.length} service(s) down`);
       }
     } catch (err) {
       logger.error('[BeWatcher] Tick error:', err.message);

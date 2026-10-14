@@ -6,6 +6,25 @@
 import logger from '../utils/logger.js';
 import { getTodayJobs, markFired, deletePastTodayJobs } from './db.js';
 import { getWeather, formatWeather } from '../tools/providers/weather/index.js';
+import { broadcastVoiceEvent } from '../channels/voice/server.js';
+import { synthesize } from '../services/voiceService.js';
+
+/**
+ * Synthesize a reminder's audio and push it to connected voice dashboards.
+ * Best-effort only: a voice-service failure is logged and swallowed here so
+ * it can never affect the Telegram delivery that already happened.
+ * @param {string} text
+ */
+async function pushVoiceReminder(text) {
+  let audio = null;
+  try {
+    const { audioBuffer } = await synthesize(text);
+    audio = audioBuffer.toString('base64');
+  } catch (err) {
+    logger.warn('[Scheduler] Voice TTS for reminder push failed:', err.message);
+  }
+  broadcastVoiceEvent({ type: 'reminder', text, audio });
+}
 
 let pollerInterval = null;
 
@@ -94,6 +113,9 @@ export async function checkAndFire(sendMessage) {
           // Send weather directly without LLM processing
           await sendMessage(job.chat_id, weatherText);
 
+          // Additive push to any connected voice dashboard — Telegram delivery above is unaffected
+          await pushVoiceReminder(weatherText);
+
           // Mark as fired
           markFired(job.id);
 
@@ -140,6 +162,9 @@ export async function checkAndFire(sendMessage) {
       await sendMessage(job.chat_id, job.message, {
         reply_markup: replyMarkup,
       });
+
+      // Additive push to any connected voice dashboard — Telegram delivery above is unaffected
+      await pushVoiceReminder(job.message);
 
       // Mark as fired
       markFired(job.id);

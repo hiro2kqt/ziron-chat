@@ -5,6 +5,7 @@
 
 import { Bot } from 'grammy';
 import logger from '../../utils/logger.js';
+import { replyTo } from './reply.js';
 
 /**
  * @typedef {Object} TelegramClient
@@ -17,14 +18,15 @@ import logger from '../../utils/logger.js';
 /**
  * Create Telegram bot client
  * @param {string} botToken - Bot token from @BotFather
+ * @param {string} [apiRoot] - Optional local Bot API server root URL (e.g. http://localhost:8082)
  * @returns {TelegramClient}
  */
-export function createClient(botToken) {
+export function createClient(botToken, apiRoot = '') {
   if (!botToken) {
     throw new Error('Telegram bot token required');
   }
 
-  const bot = new Bot(botToken);
+  const bot = apiRoot ? new Bot(botToken, { client: { apiRoot } }) : new Bot(botToken);
   let isRunning = false;
 
   return {
@@ -42,7 +44,7 @@ export function createClient(botToken) {
 
       // Start command
       bot.command('start', async (ctx) => {
-        await ctx.reply(
+        await replyTo(ctx,
           '👋 Hello! I\'m Ziron, an AI assistant powered by OpenRouter.\n\n' +
           'Send me any message and I\'ll respond using AI!'
         );
@@ -50,7 +52,7 @@ export function createClient(botToken) {
 
       // Help command
       bot.command('help', async (ctx) => {
-        await ctx.reply(
+        await replyTo(ctx,
           'Available commands:\n' +
           '/start - Start the bot\n' +
           '/help - Show this message\n' +
@@ -68,13 +70,13 @@ export function createClient(botToken) {
         if (handlers.onNewSession) {
           await handlers.onNewSession(ctx);
         } else {
-          await ctx.reply('Started new conversation session!');
+          await replyTo(ctx, 'Started new conversation session!');
         }
       });
 
       // Ping command
       bot.command('ping', async (ctx) => {
-        await ctx.reply('🏓 Pong!');
+        await replyTo(ctx, '🏓 Pong!');
       });
 
       // Model command
@@ -82,7 +84,7 @@ export function createClient(botToken) {
         if (handlers.onModel) {
           await handlers.onModel(ctx);
         } else {
-          await ctx.reply('🤖 Model info not available.');
+          await replyTo(ctx, '🤖 Model info not available.');
         }
       });
 
@@ -91,7 +93,7 @@ export function createClient(botToken) {
         if (handlers.onTasks) {
           await handlers.onTasks(ctx);
         } else {
-          await ctx.reply('No tasks configured.');
+          await replyTo(ctx, 'No tasks configured.');
         }
       });
 
@@ -100,7 +102,7 @@ export function createClient(botToken) {
         if (handlers.onTaskToday) {
           await handlers.onTaskToday(ctx);
         } else {
-          await ctx.reply('No tasks for today.');
+          await replyTo(ctx, 'No tasks for today.');
         }
       });
 
@@ -109,7 +111,7 @@ export function createClient(botToken) {
         if (handlers.onCheckBe) {
           await handlers.onCheckBe(ctx);
         } else {
-          await ctx.reply('BE watcher not available.');
+          await replyTo(ctx, 'BE watcher not available.');
         }
       });
 
@@ -118,7 +120,7 @@ export function createClient(botToken) {
         if (handlers.onBeSnapshot) {
           await handlers.onBeSnapshot(ctx);
         } else {
-          await ctx.reply('BE snapshot not available.');
+          await replyTo(ctx, 'BE snapshot not available.');
         }
       });
 
@@ -130,7 +132,7 @@ export function createClient(botToken) {
             await handlers.onMessage(ctx);
           } catch (err) {
             logger.error('Message handler error:', err);
-            await ctx.reply('Sorry, an error occurred processing your message.');
+            await replyTo(ctx, 'Sorry, an error occurred processing your message.');
           }
         });
       }
@@ -202,11 +204,12 @@ export function createClient(botToken) {
 /**
  * Validate bot token
  * @param {string} botToken
+ * @param {string} [apiRoot]
  * @returns {Promise<Object|null>} Bot info or null if invalid
  */
-export async function validateBotToken(botToken) {
+export async function validateBotToken(botToken, apiRoot = '') {
   try {
-    const bot = new Bot(botToken);
+    const bot = apiRoot ? new Bot(botToken, { client: { apiRoot } }) : new Bot(botToken);
     const me = await bot.api.getMe();
     return me;
   } catch (err) {

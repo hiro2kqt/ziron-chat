@@ -18,10 +18,10 @@ import path from 'node:path';
 import os from 'node:os';
 import Email from '../db/models/Email.js';
 import { getTodayJobs, getMasterJobs } from '../scheduler/db.js';
-import { shouldRunToday, shiftUtcTime } from '../scheduler/sync.js';
+import { occurrencesForDate } from '../scheduler/sync.js';
 import { complete } from '../providers/openrouter.js';
 import { getForcedChatId } from '../config/index.js';
-import { formatLocal, localDateStr, utcTimeToLocal } from '../utils/time.js';
+import { formatLocal, localDateStr } from '../utils/time.js';
 import { addDays, selectEmails, selectSchedule, formatBriefData, BRIEF_CATEGORIES } from './briefData.js';
 import logger from '../utils/logger.js';
 
@@ -54,15 +54,28 @@ function weekdayVi(dateStr) {
 
 // ─── Data fetching (raw rows -> plain objects); selection lives in briefData.js ─
 
-/** All scheduler items for a local date, tagged so selectSchedule can filter */
+/**
+ * All scheduler items whose fire time falls on a LOCAL date, tagged so
+ * selectSchedule can filter. Rows are stored by UTC date/time, so a local day
+ * spans two UTC dates (e.g. 00:30 Berlin = 23:30 UTC the day before): both
+ * are scanned and each instant is converted back to the local date.
+ */
 export function fetchSchedule(dateStr, todayStr) {
   const masters = new Map(getMasterJobs().map(j => [j.id, j]));
   const everyDay = job => !!job && !(job.specific_dates?.length) && !(job.repeat_days?.length);
+  const utcDays = [addDays(dateStr, -1), dateStr, addDays(dateStr, 1)];
   const items = [];
-  if (dateStr === todayStr) {
-    for (const j of getTodayJobs(new Date().toISOString().slice(0, 10))) {
-      items.push({
-        time: utcTimeToLocal(j.fire_at, j.date),
+  const push = (utcDate, utcTime, base) => {
+    const instant = new Date(`${utcDate}T${utcTime.slice(0, 5)}:00Z`);
+    if (localDateStr(instant) !== dateStr) return;
+    items.push({ ...base, time: formatLocal(instant, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) });
+  };
+
+  // Materialized rows: today's recurring instances + one-shots on any date
+  // (snoozes, deadline reminders, future-dated reminders)
+  for (const d of utcDays) {
+    for (const j of getTodayJobs(d)) {
+      push(j.date, j.fire_at, {
         name: j.name,
         message: j.message,
         oneshot: j.source === 'oneshot',
@@ -70,19 +83,22 @@ export function fetchSchedule(dateStr, todayStr) {
         isTool: j.action?.type === 'tool_call',
       });
     }
-  } else {
+  }
+
+  // Future days: recurring/date-specific masters are not materialized yet.
+  // Same occurrence math as the midnight sync (DST + midnight carry).
+  if (dateStr !== todayStr) {
     for (const job of masters.values()) {
-      if (!shouldRunToday(job, dateStr)) continue;
-      for (const t of job.time_triggers || []) {
-        items.push({
-          // stored UTC (computed with tz_offset_min) -> local wall-clock
-          time: shiftUtcTime(t.time, job.tz_offset_min ?? 120).slice(0, 5),
-          name: job.name,
-          message: t.message,
-          oneshot: false,
-          everyDay: everyDay(job),
-          isTool: t.action?.type === 'tool_call',
-        });
+      for (const d of utcDays) {
+        for (const { trigger: t, time } of occurrencesForDate(job, d)) {
+          push(d, time, {
+            name: job.name,
+            message: t.message,
+            oneshot: false,
+            everyDay: everyDay(job),
+            isTool: t.action?.type === 'tool_call',
+          });
+        }
       }
     }
   }

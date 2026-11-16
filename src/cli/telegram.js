@@ -7,7 +7,7 @@ import { initDailyBrief, buildBrief } from '../services/dailyBrief.js';
 import { utcTimeToLocal, formatLocal } from '../utils/time.js';
 import { shiftUtcTime } from '../scheduler/sync.js';
 import { loadConfig, getForcedChatId } from '../config/index.js';
-import { setReplyConfig, replyTo, typingTo } from '../channels/telegram/reply.js';
+import { setReplyConfig, replyTo, typingTo, replyWithPlaceholder } from '../channels/telegram/reply.js';
 import { createClient, validateBotToken } from '../channels/telegram/index.js';
 import { chat as openrouterChat } from '../providers/openrouter.js';
 import { chat as openaiChat } from '../providers/openai.js';
@@ -102,33 +102,19 @@ export async function connectCommand() {
           return;
         }
 
-        // Send typing indicator
-        await typingTo(ctx);
-
+        // "💭 thinking..." placeholder after 1.5s, edited into the answer
         try {
-          // Use gateway to handle message with conversation history
-          const response = await handleMessage({
-            channelType: 'telegram',
-            channelId: ctx.chat.id,
-            userMessage: text,
+          await replyWithPlaceholder(ctx, async () => {
+            const response = await handleMessage({
+              channelType: 'telegram',
+              channelId: ctx.chat.id,
+              userMessage: text,
+            });
+            logger.info(`[Bot]: ${String(response).substring(0, 100)}...`);
+            return response;
           });
-
-          logger.info(`[Bot]: ${response.substring(0, 100)}...`);
-
-          try {
-            if (response && response.trim() !== '') {
-              await replyTo(ctx, response, { parse_mode: 'Markdown' });
-            }
-          } catch (err) {
-            logger.warn('Markdown parse failed, sending plain text');
-            if (response && response.trim() !== '') {
-              await replyTo(ctx, response);
-            }
-          }
-
         } catch (err) {
           logger.error('Gateway error:', err.message);
-          await replyTo(ctx, '❌ Sorry, I encountered an error generating a response.');
         }
       },
 
@@ -178,16 +164,14 @@ export async function connectCommand() {
           const arg = String(ctx.match || '').trim().toLowerCase();
           // Command args are English, like the commands themselves: /brief [today|tomorrow]
           const kind = /^(tomorrow|tmr)$/.test(arg) ? 'evening' : 'morning';
-          await replyTo(ctx, '⏳ Đang tổng hợp...');
-          const text = await buildBrief(kind, config);
-          try {
-            await replyTo(ctx, text, { parse_mode: 'Markdown' });
-          } catch {
-            await replyTo(ctx, text);
-          }
+          // Placeholder right away (the brief takes a few seconds), edited into the result
+          await replyWithPlaceholder(ctx, () => buildBrief(kind, config), {
+            delayMs: 0,
+            text: '⏳ Đang tổng hợp...',
+            onError: '❌ Không tạo được bản tóm tắt.',
+          });
         } catch (err) {
           logger.error('Brief failed:', err.message);
-          await replyTo(ctx, '❌ Không tạo được bản tóm tắt.');
         }
       },
 

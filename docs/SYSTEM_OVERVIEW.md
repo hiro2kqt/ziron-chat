@@ -35,7 +35,7 @@ Telegram bot (`@hirojavisbot`, display name *Baymax*). One long-lived Node.js pr
 | Email | imapflow (IMAP + IDLE) + mailparser |
 | Weather | Google Geocoding + Open-Meteo |
 | Process manager | PM2 |
-| Tests | none in repo (see §11 for how changes were verified) |
+| Tests | `npm test` — `node:test`, `test/*.test.mjs` (time, scheduler, mail/brief); see §11 |
 
 ---
 
@@ -83,7 +83,7 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 | `src/prompts/system.js` | System prompt (scheduler rules, button format, environment block) |
 | `src/tools/scheduler.js` | Tool schemas + pure time calculators (`calculateTime`, `calculateTimeRange`, …) |
 | `src/scheduler/db.js` | SQLite schema, migrations, all job queries (`claimJob`, `getPendingJobsByRefId`, …) |
-| `src/scheduler/sync.js` | Daily master → today materialization, DST shift (`shiftUtcTime`), `shouldRunToday` |
+| `src/scheduler/sync.js` | Daily master → today materialization; `occurrenceOn` / `occurrencesForDate` (DST shift with date carry), `shouldRunToday` |
 | `src/scheduler/poller.js` | 3 s tick: fires due jobs (claim-before-send) |
 | `src/channels/telegram/actions.js` | Inline button handlers: `done`, `snooze`, `mail`, `mremind`, legacy `delete` |
 | `src/channels/telegram/client.js` | grammY bot, commands, menu registration, 60 s request timeout |
@@ -158,6 +158,8 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 - `today_jobs.fire_at` / `date`: UTC. Mongo `Email.date`: UTC `Date`.
 - Recurring master jobs store UTC times **plus `tz_offset_min`** (offset used when computed). Sync shifts
   them by `tz_offset_min − offset(that date)`, so "08:15 every Tuesday" stays 08:15 local across DST.
+  Use `occurrenceOn()` for this: if the shift crosses 00:00 UTC the occurrence moves to the adjacent UTC
+  date (sync scans source dates D-1..D+1). `shiftUtcTime()` wraps within the day and is for display only.
   On 2026-11-16 all masters were rebased to the then-current CET (`tz_offset_min = 60`).
 - `Email.deadline` is **local** (`YYYY-MM-DD[THH:MM]`), converted with `localToUtc` when reminders are created.
 - Helpers (`src/utils/time.js`): `utcTimeToLocal`, `formatLocal`, `localDateStr`, `localToUtc`, `shiftUtcTime` (sync.js).
@@ -251,15 +253,24 @@ Chat capabilities the LLM has as tools: `calculateTime`, `calculateTimeRange`, `
 
 ---
 
-## 11. How changes were verified (reuse these patterns)
+## 11. Tests and verification
 
-No test suite exists; changes on 2026-11-16 were verified with throwaway scripts against **isolated copies**:
+`npm test` runs the regression suite (no extra deps, ~1 s). It covers the bugs fixed on 2026-11-16:
+DST offsets, UTC↔local conversion, DST shift across midnight, specific dates after local midnight,
+`shouldRunToday` for arbitrary dates, the duplicate-send race, future-dated one-shots, date extraction,
+brief selection, deadline reminder planning, Markdown escaping and email buttons.
+`test/scheduler.test.mjs` sets `HOME` to a temp dir before importing, so it never touches `~/.ziron`.
+**Run `npm test` before every `pm2 restart ziron`.**
+
+Larger changes were also verified with throwaway scripts against **isolated copies**:
 - Run code with `HOME=<scratch dir>` containing copies of `~/.ziron/{scheduler,memory,sessions}` → real code, no live data touched.
 - Copy the repo (`src`, `config.json`, symlink `node_modules`) to switch models per run; drive `gateway.handleMessage` with real prompts and check what landed in SQLite.
 - Mongo tests use a separate database (`ziron_test`), dropped afterwards.
 - Classifier: hand-label real mails by the rules in §12, run each model, compare.
 - Button handlers: call `handleInlineAction` with a fake grammY `ctx` (`callbackQuery`, `answerCallbackQuery`, `api.sendMessage`).
 - Back up before touching live data (`better-sqlite3` `db.backup()`, Mongo export to JSON).
+- Simulations that move a fake clock through future dates (midnight sync) mutate the copy (auto-disable of
+  expired date-specific jobs, cleanup of past rows): use a **fresh copy per run**.
 
 ---
 

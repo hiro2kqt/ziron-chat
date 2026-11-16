@@ -67,6 +67,8 @@ export function shouldRunToday(job, dateStr) {
 
 /**
  * Shift a UTC "HH:mm" / "HH:mm:ss" time by N minutes (wraps within the day).
+ * Display only (local HH:mm of a master time). For scheduling use
+ * occurrenceOn(), which also moves the date when crossing midnight.
  * @param {string} time
  * @param {number} deltaMin
  * @returns {string}
@@ -79,6 +81,52 @@ export function shiftUtcTime(time, deltaMin) {
   return sec !== undefined ? `${out}:${sec}` : out;
 }
 
+function addDaysUtc(dateStr, n) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Real UTC date + time of one occurrence of a master trigger.
+ * Master times are UTC computed with job.tz_offset_min; on `sourceDate` (the
+ * date in the job's own calendar: specific_dates / repeat_days) the offset may
+ * differ (DST), so the time is shifted — and if the shift crosses 00:00 UTC
+ * the occurrence moves to the adjacent UTC date (shiftUtcTime alone would
+ * wrap within the same day and fire 24h early/late).
+ * @param {Object} job
+ * @param {{time: string}} trigger
+ * @param {string} sourceDate - YYYY-MM-DD
+ * @returns {{date: string, time: string}}
+ */
+export function occurrenceOn(job, trigger, sourceDate) {
+  const offset = getTzOffsetMinutes(getUserTimezone(), new Date(`${sourceDate}T12:00:00Z`));
+  const delta = (job.tz_offset_min ?? 120) - offset;
+  const [h, m, sec] = String(trigger.time).split(':');
+  const total = Number(h) * 60 + Number(m) + delta;
+  const carry = Math.floor(total / 1440);
+  const mins = ((total % 1440) + 1440) % 1440;
+  const hhmm = `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  return { date: addDaysUtc(sourceDate, carry), time: sec !== undefined ? `${hhmm}:${sec}` : hhmm };
+}
+
+/**
+ * Occurrences of a master job that actually fall on UTC date `dateStr`,
+ * including ones that a DST shift moved over midnight from an adjacent day.
+ * @returns {Array<{trigger: Object, time: string}>}
+ */
+export function occurrencesForDate(job, dateStr) {
+  const out = [];
+  for (const src of [addDaysUtc(dateStr, -1), dateStr, addDaysUtc(dateStr, 1)]) {
+    if (!shouldRunToday(job, src)) continue;
+    for (const trigger of job.time_triggers || []) {
+      const occ = occurrenceOn(job, trigger, src);
+      if (occ.date === dateStr) out.push({ trigger, time: occ.time });
+    }
+  }
+  return out;
+}
+
 /**
  * Create today_jobs from a single master job
  * @param {Object} job - Master job object
@@ -86,16 +134,10 @@ export function shiftUtcTime(time, deltaMin) {
  * @returns {number} Number of today_jobs created
  */
 function createTodayJobsFromMaster(job, dateStr) {
-  const triggers = job.time_triggers || [];
   let count = 0;
 
-  // Keep local wall-clock time stable across DST: times were stored in UTC
-  // using job.tz_offset_min; re-target them to the offset in effect today.
-  const createdOffset = job.tz_offset_min ?? 120;
-  const todayOffset = getTzOffsetMinutes(getUserTimezone(), new Date(`${dateStr}T12:00:00Z`));
-  const deltaMin = createdOffset - todayOffset;
-
-  for (const trigger of triggers) {
+  // DST-correct occurrences landing on this UTC date (see occurrenceOn)
+  for (const { trigger, time } of occurrencesForDate(job, dateStr)) {
     // Check if buttons is a valid 2D array
     const rawButtons = trigger.buttons || [];
     const isValidFormat = Array.isArray(rawButtons) && (rawButtons.length === 0 || Array.isArray(rawButtons[0]));
@@ -122,7 +164,7 @@ function createTodayJobsFromMaster(job, dateStr) {
       job_id: job.id,
       name: job.name,
       chat_id: job.chat_id,
-      fire_at: shiftUtcTime(trigger.time, deltaMin),
+      fire_at: time,
       message: trigger.message,
       buttons,
       source: 'recurring',
@@ -171,12 +213,8 @@ export async function syncTodayJobs() {
 
     // Re-create from master
     for (const job of allJobs) {
-      if (shouldRunToday(job, dateStr)) {
-        const count = createTodayJobsFromMaster(job, dateStr);
-        syncedCount += count;
-      } else {
-        logger.debug(`[Scheduler] Skipping job ${job.name} (not scheduled for today)`);
-      }
+      // Also covers occurrences moved onto today from an adjacent day by DST
+      syncedCount += createTodayJobsFromMaster(job, dateStr);
       
       // Auto-disable expired specific_dates jobs
       if (job.specific_dates && job.specific_dates.length > 0) {
@@ -218,13 +256,7 @@ export async function reSyncJob(jobId) {
       return;
     }
 
-    // 3. Check if should run today
-    if (!shouldRunToday(job, dateStr)) {
-      logger.debug(`[Scheduler] Job ${job.name} should not run today - skipping`);
-      return;
-    }
-
-    // 4. Create new today_jobs
+    // 3. Create new today_jobs (0 if nothing falls on today)
     const count = createTodayJobsFromMaster(job, dateStr);
 
     logger.info(`[Scheduler] Re-synced job: ${job.name} (${count} today_jobs created)`);

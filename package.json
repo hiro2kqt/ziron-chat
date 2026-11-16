@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node ziron.mjs telegram connect",
     "dev": "node --watch ziron.mjs",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "LOG_LEVEL=error node --test 'test/*.test.mjs'"
   },
   "keywords": [
     "ai",

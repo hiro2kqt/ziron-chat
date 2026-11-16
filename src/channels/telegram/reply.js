@@ -19,7 +19,6 @@ export function setReplyConfig(config) {
  * @param {Object} [options]
  */
 export async function replyTo(ctx, text, options = {}) {
-  console.log("dasd")
   const forced = getForcedChatId(_config);
   if (forced) {
     return ctx.api.sendMessage(forced, text, options);
@@ -32,7 +31,6 @@ export async function replyTo(ctx, text, options = {}) {
  * @param {import('grammy').Context} ctx
  */
 export async function typingTo(ctx) {
-  console.log(ctx)
   const forced = getForcedChatId(_config);
   if (forced) {
     return ctx.api.sendChatAction(forced, 'typing');

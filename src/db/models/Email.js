@@ -38,10 +38,21 @@ const emailSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['deadline', 'exam', 'assignment', 'announcement', 'other'],
+    enum: ['registration', 'exam', 'assignment', 'deadline', 'course', 'announcement', 'other'],
     default: 'other',
   },
+  // One-sentence English summary for notifications
   summary: {
+    type: String,
+    default: '',
+  },
+  // When Hiro must act ("YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", local time), if any
+  deadline: {
+    type: String,
+    default: null,
+  },
+  // Why the classifier marked it (not) important
+  reason: {
     type: String,
     default: '',
   },

@@ -8,6 +8,9 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { loadConfig, getForcedChatId } from './config/index.js';
+import { toGmtString, utcTimeToLocal } from './utils/time.js';
+import { PRIVATE_ROUTING } from './providers/openrouter.js';
+import { shiftUtcTime } from './scheduler/sync.js';
 import { createSession, appendMessage, buildApiMessages } from './storage/history.js';
 import { createClient } from './api/client.js';
 import { buildSystemPrompt } from './prompts/system.js';
@@ -34,8 +37,9 @@ import {
 import { getWeatherTools } from './tools/weather.js';
 import { getWeather, formatWeather } from './tools/providers/weather/index.js';
 import { getEmailTools } from './tools/email.js';
-import { checkNewEmails, formatEmailNotification, queryEmails, formatQueryResults } from './tools/providers/email/index.js';
+import { checkNewEmails, formatEmailNotification, buildEmailKeyboard, queryEmails, formatQueryResults } from './tools/providers/email/index.js';
 import { connectMongo } from './db/mongo.js';
+import { startIdleWatcher } from './tools/providers/email/watcher.js';
 import logger from './utils/logger.js';
 
 /**
@@ -283,7 +287,7 @@ class OpenRouterProviderAdapter {
    * @returns {Promise<Object>} LLMResponse
    */
   async chat(params) {
-    const { system, messages, tools, max_tokens } = params;
+    const { system, messages, tools, max_tokens, reasoning } = params;
 
     // Convert Anthropic-style messages to OpenAI format
     const convertedMessages = this.convertMessagesToOpenAI(messages);
@@ -300,6 +304,9 @@ class OpenRouterProviderAdapter {
       max_tokens: max_tokens || this.maxTokens,
       temperature: 1.0,
     };
+    if (reasoning) payload.reasoning = reasoning;
+    // Same private routing as providers/openrouter.js (no data retention/training)
+    payload.provider = PRIVATE_ROUTING;
 
     // Convert and add tools if provided (OpenRouter uses OpenAI format)
     if (tools && tools.length > 0) {
@@ -309,10 +316,11 @@ class OpenRouterProviderAdapter {
     // Log LLM interaction deeply if asked
     logger.info(`[LLM OUT] Gửi yêu cầu lên OpenRouter (${this.model})...`);
     logger.info(`[LLM OUT] System Prompt dài ${system.length} kí tự.`);
-    logger.info(`[LLM OUT] Tin nhắn gửi lên:`, JSON.stringify(convertedMessages, null, 2));
+    // Full message dump only in debug: it is the whole history every call
+    logger.debug(`[LLM OUT] Tin nhắn gửi lên:`, JSON.stringify(convertedMessages, null, 2));
 
-    // Dump prompt so user can debug
-    try {
+    // Dump full payload to ~/.ziron/prompts only when settings.logLevel = "debug"
+    if (logger.isDebug()) try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `prompt_${timestamp}.json`;
       const debugPath = join(homedir(), '.ziron', 'prompts');
@@ -435,13 +443,34 @@ function startEmailPolling(sendMessage) {
     return;
   }
 
-  const intervalHours = emailConfig.pollIntervalHours || 2;
-  const intervalMs = intervalHours * 60 * 60 * 1000;
+  // IDLE push is the primary trigger; the interval poll is only a safety net.
+  const intervalMinutes = emailConfig.pollIntervalMinutes
+    || (emailConfig.pollIntervalHours ? emailConfig.pollIntervalHours * 60 : 15);
+  const intervalMs = intervalMinutes * 60 * 1000;
 
-  logger.info(`[Email Monitor] Starting email polling (every ${intervalHours} hour(s))`);
+  logger.info(`[Email Monitor] Starting email monitor (IDLE push + poll every ${intervalMinutes} min)`);
 
-  // Poll function
+  // Serialize checks: IDLE events and the interval may fire together, and two
+  // concurrent checks could both see a UID as new and notify twice.
+  let checkRunning = false;
+  let checkPending = false;
   const pollEmails = async () => {
+    if (checkRunning) {
+      checkPending = true;
+      return;
+    }
+    checkRunning = true;
+    try {
+      do {
+        checkPending = false;
+        await pollEmailsOnce();
+      } while (checkPending);
+    } finally {
+      checkRunning = false;
+    }
+  };
+
+  const pollEmailsOnce = async () => {
     try {
       logger.info('[Email Monitor] Checking for new emails...');
 
@@ -460,7 +489,7 @@ function startEmailPolling(sendMessage) {
         const forced = getForcedChatId(gatewayState.config);
         if (forced) {
           try {
-            await sendMessage(forced, notification, { parse_mode: 'Markdown' });
+            await sendMessage(forced, notification, { parse_mode: 'Markdown', reply_markup: buildEmailKeyboard(importantEmails) });
             logger.success(`[Email Monitor] Sent notification to forced chat ${forced}`);
           } catch (sendErr) {
             logger.error(`[Email Monitor] Failed to send to forced chat ${forced}:`, sendErr.message);
@@ -473,7 +502,7 @@ function startEmailPolling(sendMessage) {
           }
           for (const chatId of chatIds) {
             try {
-              await sendMessage(chatId, notification, { parse_mode: 'Markdown' });
+              await sendMessage(chatId, notification, { parse_mode: 'Markdown', reply_markup: buildEmailKeyboard(importantEmails) });
               logger.success(`[Email Monitor] Sent notification to chat ${chatId}`);
             } catch (sendErr) {
               logger.error(`[Email Monitor] Failed to send to chat ${chatId}:`, sendErr.message);
@@ -496,8 +525,11 @@ function startEmailPolling(sendMessage) {
     logger.error('[Email Monitor] Initial poll failed:', err.message);
   });
 
-  // Schedule recurring polls
+  // Schedule recurring polls (fallback) + push watcher
   gatewayState.emailPollInterval = setInterval(pollEmails, intervalMs);
+  gatewayState.emailIdleStop = startIdleWatcher(emailConfig.imap, () => {
+    pollEmails().catch(err => logger.error('[Email Monitor] IDLE-triggered poll failed:', err.message));
+  });
 
   logger.success(`[Email Monitor] Email polling started`);
 }
@@ -511,6 +543,10 @@ export function stopEmailPolling() {
     clearInterval(gatewayState.emailPollInterval);
     gatewayState.emailPollInterval = null;
     logger.info('[Email Monitor] Email polling stopped');
+  }
+  if (gatewayState.emailIdleStop) {
+    gatewayState.emailIdleStop();
+    gatewayState.emailIdleStop = null;
   }
 }
 
@@ -641,6 +677,19 @@ export async function handleMessage(params) {
   // Generate a refId for this conversation turn (used to group related jobs)
   const refId = randomUUID();
 
+  // Scheduler/reminder delivery is always Telegram, regardless of which channel
+  // (voice, telegram, ...) the request came in on, so this must resolve to the
+  // configured owner's Telegram chat ID, not the per-channel session ID.
+  // Used both as a prompt hint below and as a hard server-side override in
+  // onToolCall further down — the LLM's own chatId argument is never trusted
+  // for scheduler creation/listing calls.
+  const forcedChatId = getForcedChatId(gatewayState.config) || channelId;
+
+  // Current fixed offset for the configured zone, e.g. "GMT+1" (CET) / "GMT+2" (CEST)
+  const userTimezone = gatewayState.config?.user?.timezone
+    ? toGmtString(gatewayState.config.user.timezone)
+    : '';
+
   // Build dynamic system prompt with context
   const systemPrompt = await buildSystemPrompt({
     context: {
@@ -648,12 +697,13 @@ export async function handleMessage(params) {
       currentTimeUTC: new Date().toUTCString(), // Explicit UTC time string
       currentTimezoneContext: "CRITICAL TIMEZONE RULE: 1. You MUST know the user's explicit timezone offset (like UTC+7, EST, etc). 2. Look for it in the 'User's System Configured Timezone' above, OR in 'Personalization and Context' OR recent messages. 3. If you CANNOT find their explicit timezone offset, DO NOT CALL SCHEDULING TOOLS. Instead, reply: 'Vui lòng cho tôi biết múi giờ của bạn (VD: GMT+7)'. 4. Once you have the timezone offset, calculate the exact UTC time to pass to the tool. Example: User in GMT+7 asks for 14:00 -> Pass 07:00 UTC to tool.",
       location: gatewayState.config?.user?.location || '',
-      timezone: gatewayState.config?.user?.timezone || '',
+      // Resolve IANA zones (e.g. Europe/Berlin) to today's real offset so the
+      // LLM and the GMT±N-only scheduler tools never use a stale DST offset.
+      timezone: userTimezone
+        ? `${userTimezone} (${gatewayState.config.user.timezone}, current offset incl. DST — this overrides any timezone/offset mentioned in memory or past messages)`
+        : '',
       availableTools: ['scheduler', 'weather', 'email', 'query_emails'],
-      // Scheduler/reminder delivery is always Telegram, regardless of which channel
-      // (voice, telegram, ...) the request came in on, so this must resolve to the
-      // configured owner's Telegram chat ID, not the per-channel session ID.
-      chatId: getForcedChatId(gatewayState.config) || channelId,
+      chatId: forcedChatId,
       refId,
     },
     // includeMemory: true is default
@@ -668,6 +718,12 @@ export async function handleMessage(params) {
 
   // Tool call handler
   const onToolCall = async (name, input) => {
+    // Server-side override, like forcedChatId: the timezone offset must come
+    // from config (DST-aware), never from the LLM, which tends to copy a stale
+    // offset out of memory or prompt examples (e.g. "GMT+2" in winter).
+    if (name.startsWith('calculate') && userTimezone) {
+      input = { ...input, timezone: userTimezone };
+    }
     logger.info(`[Tool] ${name} called with:`, JSON.stringify(input));
 
     switch (name) {
@@ -709,22 +765,27 @@ export async function handleMessage(params) {
       }
 
       case 'addOneshotJob': {
-        const job = await addOneshotJob(input);
+        // chatId is always the configured owner's Telegram chat, never the
+        // LLM-supplied argument - see forcedChatId above.
+        const job = await addOneshotJob({ ...input, chatId: forcedChatId });
         return `Oneshot job created: ${job.name} at ${job.fire_at}`;
       }
 
       case 'addOneshotInterval': {
-        const count = await addOneshotInterval(input);
+        const count = await addOneshotInterval({ ...input, chatId: forcedChatId });
         return `Oneshot interval created: ${count} jobs scheduled`;
       }
 
       case 'addRecurringJob': {
-        const job = await addRecurringJob(input);
+        const job = await addRecurringJob({ ...input, chatId: forcedChatId });
         return `Recurring job created: ${job.name}`;
       }
 
       case 'listTodayJobs': {
-        const jobs = await listTodayJobs(input.chatId);
+        // fire_at is UTC (storage); give the model the local time too so it
+        // never has to convert when talking to the user
+        const jobs = (await listTodayJobs(forcedChatId))
+          .map(j => ({ ...j, fire_at_local: utcTimeToLocal(j.fire_at, j.date) }));
         return JSON.stringify(jobs, null, 2);
       }
 
@@ -733,8 +794,26 @@ export async function handleMessage(params) {
         return `Disabled ${count} jobs`;
       }
 
+      case 'deleteJob': {
+        // Only jobs that belong to the owner's chat can be deleted
+        const owned = (await listMasterJobs(forcedChatId)).find(j => j.id === input.jobId);
+        if (!owned) {
+          return `No recurring job with id ${input.jobId} found. Call listMasterJobs to get the exact id.`;
+        }
+        const ok = await deleteJob(owned.id);
+        return ok
+          ? `Deleted recurring job "${owned.name}" permanently (it will not fire again).`
+          : `Failed to delete job "${owned.name}".`;
+      }
+
       case 'listMasterJobs': {
-        const jobs = await listMasterJobs(input.chatId);
+        const jobs = (await listMasterJobs(forcedChatId)).map(j => ({
+          ...j,
+          time_triggers: (j.time_triggers || []).map(t => ({
+            ...t,
+            time_local: shiftUtcTime(t.time, j.tz_offset_min ?? 120).slice(0, 5),
+          })),
+        }));
         return JSON.stringify(jobs, null, 2);
       }
 

@@ -6,6 +6,9 @@
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_MODEL = 'anthropic/claude-3.5-sonnet';
 const DEFAULT_MAX_TOKENS = 4096;
+// Route only to upstreams that don't store or train on prompts: requests carry
+// personal mail, schedules and chat. Override per call with options.provider.
+export const PRIVATE_ROUTING = { data_collection: 'deny' };
 
 /**
  * @typedef {Object} Message
@@ -42,6 +45,11 @@ export async function complete(messages, apiKey, options = {}) {
     max_tokens: options.maxTokens || DEFAULT_MAX_TOKENS,
     temperature: options.temperature ?? 1.0,
   };
+  // e.g. { effort: 'low' } or { enabled: false } for reasoning-capable models
+  if (options.reasoning) payload.reasoning = options.reasoning;
+  // e.g. { type: 'json_schema', json_schema: {...} } for structured output
+  if (options.responseFormat) payload.response_format = options.responseFormat;
+  payload.provider = options.provider ?? PRIVATE_ROUTING;
 
   const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
     method: 'POST',
@@ -52,6 +60,9 @@ export async function complete(messages, apiKey, options = {}) {
       'X-Title': 'Ziron',
     },
     body: JSON.stringify(payload),
+    // A hung request must not stall callers forever (the email checker is
+    // serialized, so one stuck call would block every later check)
+    signal: AbortSignal.timeout(options.timeoutMs ?? 120000),
   });
 
   if (!response.ok) {

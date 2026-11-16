@@ -5,6 +5,7 @@
  * 2. Scheduled job: getWeather({ city?, lat, lon }) - skips geocoding
  */
 
+import { formatLocal } from '../../../utils/time.js';
 import { fileURLToPath } from "url";
 import { loadConfig } from "../../../config/index.js";
 import { geocode } from "./geocode.js";
@@ -94,11 +95,8 @@ export function formatWeather(result) {
 
   // Format date time from ISO string
   const date = new Date(time);
-  const dateStr = date.toLocaleDateString("en-US");
-  const timeStr = date.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const dateStr = formatLocal(date, { year: "numeric", month: "2-digit", day: "2-digit" });
+  const timeStr = formatLocal(date, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
   // Determine weather emoji based on condition
   let emoji = "🌤";

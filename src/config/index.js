@@ -10,6 +10,8 @@ import { parse as parseYaml } from 'yaml';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { DEFAULT_CONFIG, mergeWithDefaults } from './schema.js';
+import { setUserTimezone } from '../utils/time.js';
+import { setConfigLogLevel } from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '../..');
@@ -106,6 +108,10 @@ export function loadConfig() {
   const cfg = mergeWithDefaults(config);
   cfg.telegram.chatId = cfg.telegram.chatId ? String(cfg.telegram.chatId) : '';
   cfg.telegram.allowedUserIds = (cfg.telegram.allowedUserIds ?? []).map(String);
+  // Scheduler code reads the user's timezone without a config handle
+  setUserTimezone(cfg.user?.timezone);
+  // settings.logLevel was never applied; LOG_LEVEL env var still overrides
+  setConfigLogLevel(cfg.settings?.logLevel);
   return cfg;
 }
 

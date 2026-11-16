@@ -4,7 +4,7 @@
  */
 
 import Email from '../../../db/models/Email.js';
-import { getDateRange, parseISODate, getStartOfDay, getEndOfDay } from '../../../utils/time.js';
+import { getDateRange, parseISODate, getStartOfDay, getEndOfDay, formatLocal } from '../../../utils/time.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -76,6 +76,13 @@ export async function queryEmails(params = {}) {
       'announcement': 'announcement',
       'announcements': 'announcement',
       'news': 'announcement',
+      'registration': 'registration',
+      'registrations': 'registration',
+      'enrollment': 'registration',
+      'course': 'course',
+      'courses': 'course',
+      'lecture': 'course',
+      'lectures': 'course',
     };
 
     const category = categoryMatch[topicLower];
@@ -84,7 +91,9 @@ export async function queryEmails(params = {}) {
       query.category = category;
     } else {
       // Use regex search on subject, summary, and category
-      const topicRegex = new RegExp(topic, 'i');
+      // Escape: topic comes from the LLM/user ("C++", "(GLM)") and must not
+      // be interpreted as a regex
+      const topicRegex = new RegExp(topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [
         { subject: topicRegex },
         { summary: topicRegex },
@@ -122,13 +131,8 @@ export function formatQueryResults(emails) {
   let result = `Found ${emails.length} email(s):\n\n`;
 
   emails.forEach((email, i) => {
-    const dateStr = new Date(email.date).toLocaleString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+    // Stored as UTC; show in the user's zone
+    const dateStr = formatLocal(email.date);
 
     result += `${i + 1}. [${email.category.toUpperCase()}] ${email.subject}\n`;
     result += `   From: ${email.from}\n`;

@@ -17,11 +17,20 @@ import logger from '../../../utils/logger.js';
  * @param {string} mailbox - Mailbox name
  * @returns {Promise<Object>} { processedCount, highestUID, importantEmails }
  */
-async function processBatch(client, uidList, mailbox) {
+// Only notify for mail this recent; older backlog (e.g. after downtime) is
+// saved for querying but not pushed, so a restart can't flood Telegram.
+const NOTIFY_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+// Enough for headers + the text body; skips downloading big attachments.
+const SOURCE_MAX_BYTES = 64 * 1024;
+
+async function processBatch(client, uidList, mailbox, minUID = 0) {
   const emails = [];
   let highestUID = 0;
 
-  for await (const msg of client.fetch(uidList, { source: true, uid: true })) {
+  for await (const msg of client.fetch(uidList, { source: { maxLength: SOURCE_MAX_BYTES }, uid: true }, { uid: true })) {
+    // IMAP quirk: "N:*" with N > max UID still returns the newest message,
+    // so every idle poll used to re-fetch and re-classify it.
+    if (msg.uid <= minUID) continue;
     try {
       const parsed = await simpleParser(msg.source);
 
@@ -31,9 +40,13 @@ async function processBatch(client, uidList, mailbox) {
         from: parsed.from?.text || '',
         date: parsed.date?.toISOString() || '',
         snippet: (parsed.text || parsed.html || '')
-          .replace(/<[^>]+>/g, '')
+          .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
           .trim()
-          .slice(0, 300),
+          // Bilingual faculty mails put the German text first; deadlines can
+          // sit past 1500 chars, so give the classifier more of the body
+          .slice(0, 6000),
       };
 
       emails.push(emailData);
@@ -51,11 +64,17 @@ async function processBatch(client, uidList, mailbox) {
   const importantEmails = [];
 
   for (const email of emails) {
+    if (await Email.exists({ mailbox, uid: email.uid })) {
+      logger.debug(`[Email Monitor] UID ${email.uid} already processed, skipping`);
+      continue;
+    }
+
     logger.debug(`[Email Monitor] Classifying: ${email.subject}`);
 
     const classification = await classifyEmail({
       subject: email.subject,
       from: email.from,
+      date: email.date,
       snippet: email.snippet,
     });
 
@@ -73,7 +92,9 @@ async function processBatch(client, uidList, mailbox) {
           snippet: email.snippet,
           important: classification.important,
           category: classification.category,
-          summary: classification.reason,
+          summary: classification.summary,
+          deadline: classification.deadline,
+          reason: classification.reason,
         },
         { upsert: true, includeResultMetadata: true }
       );
@@ -83,7 +104,12 @@ async function processBatch(client, uidList, mailbox) {
       logger.error(`[Email Monitor] Failed to save email UID ${email.uid}:`, saveErr.message);
     }
 
-    if (classification.important && !alreadyExisted) {
+    const ageMs = Date.now() - new Date(email.date).getTime();
+    const fresh = !(ageMs > NOTIFY_MAX_AGE_MS);
+
+    if (classification.important && !alreadyExisted && !fresh) {
+      logger.info(`[Email Monitor] Important but stale (${Math.round(ageMs / 3600000)}h old), saved without notifying: ${email.subject}`);
+    } else if (classification.important && !alreadyExisted) {
       importantEmails.push({
         ...email,
         classification,
@@ -208,7 +234,17 @@ async function performFullSync(client, lock, mailbox, totalMessages, startDate =
  * @param {string} [startDate] - Optional start date for initial sync (ISO string)
  * @returns {Promise<Array>} Array of important emails with classification
  */
-export async function checkNewEmails(imapConfig, mailbox = 'INBOX', startDate = null) {
+// One check at a time per process: the background poll, IDLE pushes and the
+// chat tool may all call this; overlapping runs could notify a UID twice.
+let checkQueue = Promise.resolve();
+
+export function checkNewEmails(...args) {
+  const run = checkQueue.then(() => checkNewEmailsUnlocked(...args));
+  checkQueue = run.catch(() => {});
+  return run;
+}
+
+async function checkNewEmailsUnlocked(imapConfig, mailbox = 'INBOX', startDate = null) {
   const { host, port, user, pass } = imapConfig;
 
   if (!host || !user || !pass) {
@@ -270,7 +306,7 @@ export async function checkNewEmails(imapConfig, mailbox = 'INBOX', startDate = 
       logger.info(`[Email Monitor] Fetching new emails (UID > ${lastSeenUID})`);
 
       const { processedCount, highestUID, importantEmails } =
-        await processBatch(client, searchCriteria.uid, mailbox);
+        await processBatch(client, searchCriteria.uid, mailbox, lastSeenUID);
 
       logger.info(`[Email Monitor] Found ${processedCount} new email(s)`);
 
@@ -315,4 +351,47 @@ export async function checkNewEmails(imapConfig, mailbox = 'INBOX', startDate = 
   }
 }
 
-export default { checkNewEmails };
+/**
+ * Fetch one email in full (on demand, e.g. "show full mail" button)
+ * @param {Object} imapConfig - { host, port, user, pass }
+ * @param {number} uid
+ * @param {string} [mailbox='INBOX']
+ * @returns {Promise<{subject, from, date, text, attachments: string[]}|null>}
+ */
+export async function fetchFullEmail(imapConfig, uid, mailbox = 'INBOX') {
+  const client = new ImapFlow({
+    host: imapConfig.host,
+    port: imapConfig.port || 993,
+    secure: true,
+    auth: { user: imapConfig.user, pass: imapConfig.pass },
+    logger: false,
+  });
+  await client.connect();
+  try {
+    const lock = await client.getMailboxLock(mailbox, { readOnly: true });
+    try {
+      const msg = await client.fetchOne(String(uid), { source: true }, { uid: true });
+      if (!msg?.source) return null;
+      const parsed = await simpleParser(msg.source);
+      const text = (parsed.text || (parsed.html || '')
+        .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<br\s*\/?>|<\/p>/gi, '\n')
+        .replace(/<[^>]+>/g, ' '))
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      return {
+        subject: parsed.subject || '(no subject)',
+        from: parsed.from?.text || '',
+        date: parsed.date || null,
+        text,
+        attachments: (parsed.attachments || []).map(a => a.filename).filter(Boolean),
+      };
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+export default { checkNewEmails, fetchFullEmail };

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import logger from '../utils/logger.js';
+import { getTzOffsetMinutes, getUserTimezone } from '../utils/time.js';
 
 const SCHEDULER_DIR = path.join(os.homedir(), '.ziron', 'scheduler');
 const JOBS_DB_PATH = path.join(SCHEDULER_DIR, 'jobs.db');
@@ -81,6 +82,12 @@ export function initDatabases() {
 
   // Add specific_dates column for recurring jobs on specific dates
   try { jobsDb.exec("ALTER TABLE jobs ADD COLUMN specific_dates TEXT DEFAULT '[]';"); } catch (e) {}
+
+  // UTC offset (minutes) that a master job's UTC trigger times were computed
+  // with. Sync shifts them by (tz_offset_min - offset on the target date) so
+  // recurring reminders keep their local wall-clock time across DST changes.
+  // Existing rows were all created under a fixed "GMT+2" config -> 120.
+  try { jobsDb.exec("ALTER TABLE jobs ADD COLUMN tz_offset_min INTEGER DEFAULT 120;"); } catch (e) {}
 
   // Set secure file permissions
   try {
@@ -177,8 +184,8 @@ export function insertMasterJob(job) {
   const now = new Date().toISOString();
 
   const stmt = jobsDb.prepare(`
-    INSERT INTO jobs (id, name, enabled, repeat_days, specific_dates, time_triggers, chat_id, created_at, updated_at, ref_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO jobs (id, name, enabled, repeat_days, specific_dates, time_triggers, chat_id, created_at, updated_at, ref_id, tz_offset_min)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -191,7 +198,8 @@ export function insertMasterJob(job) {
     String(job.chat_id),
     now,
     now,
-    job.ref_id || null
+    job.ref_id || null,
+    getTzOffsetMinutes(getUserTimezone())
   );
 
   logger.info(`[Scheduler] Master job created: ${job.name} (${id})`);
@@ -239,6 +247,9 @@ export function updateMasterJob(id, fields) {
   if (fields.time_triggers !== undefined) {
     updates.push('time_triggers = ?');
     values.push(JSON.stringify(fields.time_triggers));
+    // New trigger times were computed with today's offset
+    updates.push('tz_offset_min = ?');
+    values.push(getTzOffsetMinutes(getUserTimezone()));
   }
 
   if (updates.length === 0) return false;
@@ -337,6 +348,51 @@ export function markFired(todayJobId) {
   const result = stmt.run(todayJobId);
 
   return result.changes > 0;
+}
+
+/**
+ * Pending (unfired, enabled) reminders with a ref_id, on any date
+ * @param {string} refId
+ * @returns {Array<Object>}
+ */
+export function getPendingJobsByRefId(refId) {
+  if (!todayDb) throw new Error('Database not initialized');
+  return todayDb
+    .prepare('SELECT * FROM today_jobs WHERE ref_id = ? AND fired = 0 AND enabled = 1 ORDER BY date, fire_at')
+    .all(refId);
+}
+
+/**
+ * Remove every pending reminder of a ref_id on any date (task marked done)
+ * @param {string} refId
+ * @returns {number} rows deleted
+ */
+export function deletePendingJobsByRefId(refId) {
+  if (!todayDb) throw new Error('Database not initialized');
+  return todayDb.prepare('DELETE FROM today_jobs WHERE ref_id = ? AND fired = 0').run(refId).changes;
+}
+
+/**
+ * Atomically claim a today job for firing. Only the caller that flips
+ * fired 0 -> 1 gets true, so a job can never be sent twice.
+ * @param {string} todayJobId
+ * @returns {boolean} True if this caller owns the send
+ */
+export function claimJob(todayJobId) {
+  if (!todayDb) throw new Error('Database not initialized');
+  const result = todayDb
+    .prepare('UPDATE today_jobs SET fired = 1 WHERE id = ? AND fired = 0')
+    .run(todayJobId);
+  return result.changes === 1;
+}
+
+/**
+ * Release a claim after a failed send so the next tick retries it.
+ * @param {string} todayJobId
+ */
+export function unclaimJob(todayJobId) {
+  if (!todayDb) throw new Error('Database not initialized');
+  todayDb.prepare('UPDATE today_jobs SET fired = 0 WHERE id = ?').run(todayJobId);
 }
 
 /**

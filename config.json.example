@@ -20,7 +20,7 @@
     "logLevel": "info"
   },
   "user": {
-    "timezone": "",
+    "timezone": "Europe/Berlin",
     "location": "",
     "name": ""
   },
@@ -30,7 +30,8 @@
     },
     "email": {
       "enabled": false,
-      "pollIntervalHours": 2,
+      "pollIntervalMinutes": 15,
+      "classifierModel": "deepseek/deepseek-v4.1-flash-1017",
       "imap": {
         "host": "unimail.tu-dortmund.de",
         "port": 993,
@@ -38,5 +39,13 @@
         "pass": ""
       }
     }
+  },
+  "voice": {
+    "enabled": false
+  },
+  "dailyBrief": {
+    "enabled": true,
+    "morning": "07:00",
+    "evening": "21:00"
   }
 }

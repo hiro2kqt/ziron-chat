@@ -4,6 +4,7 @@
  */
 
 import logger from '../utils/logger.js';
+import { getTzOffsetMinutes, getUserTimezone } from '../utils/time.js';
 import fs from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -52,15 +53,30 @@ function getTodayDateStr() {
  * @param {string} dateStr - Date in YYYY-MM-DD format
  * @returns {boolean} True if job should run today
  */
-function shouldRunToday(job, dateStr) {
+export function shouldRunToday(job, dateStr) {
   // specific_dates overrides repeat_days completely
   if (job.specific_dates && job.specific_dates.length > 0) {
     return job.specific_dates.includes(dateStr);
   }
 
-  const dayOfWeek = new Date().getUTCDay();
+  // Day of week of dateStr (not of "now"), so this also works for tomorrow
+  const dayOfWeek = new Date(`${dateStr}T12:00:00Z`).getUTCDay();
   const repeatDays = job.repeat_days || [];
   return repeatDays.length === 0 || repeatDays.includes(dayOfWeek);
+}
+
+/**
+ * Shift a UTC "HH:mm" / "HH:mm:ss" time by N minutes (wraps within the day).
+ * @param {string} time
+ * @param {number} deltaMin
+ * @returns {string}
+ */
+export function shiftUtcTime(time, deltaMin) {
+  if (!deltaMin) return time;
+  const [h, m, sec] = time.split(':');
+  const total = (((Number(h) * 60 + Number(m) + deltaMin) % 1440) + 1440) % 1440;
+  const out = `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  return sec !== undefined ? `${out}:${sec}` : out;
 }
 
 /**
@@ -72,6 +88,12 @@ function shouldRunToday(job, dateStr) {
 function createTodayJobsFromMaster(job, dateStr) {
   const triggers = job.time_triggers || [];
   let count = 0;
+
+  // Keep local wall-clock time stable across DST: times were stored in UTC
+  // using job.tz_offset_min; re-target them to the offset in effect today.
+  const createdOffset = job.tz_offset_min ?? 120;
+  const todayOffset = getTzOffsetMinutes(getUserTimezone(), new Date(`${dateStr}T12:00:00Z`));
+  const deltaMin = createdOffset - todayOffset;
 
   for (const trigger of triggers) {
     // Check if buttons is a valid 2D array
@@ -100,7 +122,7 @@ function createTodayJobsFromMaster(job, dateStr) {
       job_id: job.id,
       name: job.name,
       chat_id: job.chat_id,
-      fire_at: trigger.time,
+      fire_at: shiftUtcTime(trigger.time, deltaMin),
       message: trigger.message,
       buttons,
       source: 'recurring',
@@ -133,7 +155,8 @@ export async function syncTodayJobs() {
 
     const dayOfWeek = new Date().getUTCDay();
 
-    logger.info(`[Scheduler] Syncing jobs for ${dateStr} (day ${dayOfWeek})`);
+    const tz = getUserTimezone();
+    logger.info(`[Scheduler] Syncing jobs for ${dateStr} (day ${dayOfWeek}), ${tz} offset today: ${getTzOffsetMinutes(tz, new Date(`${dateStr}T12:00:00Z`)) / 60}h`);
 
     const allJobs = getMasterJobs();
     let syncedCount = 0;

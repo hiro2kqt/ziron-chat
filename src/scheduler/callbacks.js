@@ -3,6 +3,7 @@
  * Handles Telegram inline button presses
  */
 
+import { utcTimeToLocal } from '../utils/time.js';
 import logger from '../utils/logger.js';
 import {
   disableTodayJobsByName,
@@ -76,7 +77,7 @@ export async function handleCallback(ctx, addOneshotJob) {
           buttons: originalJob.buttons,
         });
 
-        await ctx.answerCallbackQuery(`⏰ Nhắc lại sau ${minutes}p (${fireAt})`);
+        await ctx.answerCallbackQuery(`⏰ Nhắc lại sau ${minutes}p (${utcTimeToLocal(fireAt)})`);
         logger.info(`[Scheduler] Callback: snooze ${minutes}m for job ${todayJobId}`);
         break;
       }

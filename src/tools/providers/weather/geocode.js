@@ -24,6 +24,7 @@ export async function geocode({ address, apiKey }) {
 
   try {
     const response = await fetch(url, {
+      signal: AbortSignal.timeout(20000),
       headers: {
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask": "results.placeId,results.location,results.formattedAddress",

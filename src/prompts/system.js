@@ -365,7 +365,7 @@ Step 2: addRecurringJob({
   refId: "...",
   repeatDays: [],  // every day
   timeTriggers: [{
-    time: "05:00",  // 7h GMT+2 = 5h UTC
+    time: "05:00",  // example only: 7h local at GMT+2 = 5h UTC (always use the configured timezone)
     message: "",     // empty for tool_call
     action: {
       type: "tool_call",
@@ -491,8 +491,7 @@ Example: If refId in Environment is "c3dd92b2-df40-4997-a50d-d3a60a077068", then
 [
   [
     { "text": "✅ Xong", "callback_data": "!act:done:c3dd92b2-df40-4997-a50d-d3a60a077068" },
-    { "text": "💤 +15p", "callback_data": "!act:snooze:15:{todayJobId}" },
-    { "text": "❌ Huỷ", "callback_data": "!act:delete:c3dd92b2-df40-4997-a50d-d3a60a077068" }
+    { "text": "💤 +15p", "callback_data": "!act:snooze:15:{todayJobId}" }
   ]
 ]
 \`\`\`
@@ -520,7 +519,7 @@ refId groups related jobs so they can be managed together.
 After scheduling, tell Hiro:
 - What was scheduled
 - When it will fire (convert UTC back to local time)
-- How to cancel: "Bấm ❌ Huỷ trên reminder hoặc nói 'hủy [tên job]'"
+- How to cancel: "Nói 'hủy [tên job]'"
 
 ## Managing Jobs
 

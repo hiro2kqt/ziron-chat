@@ -21,6 +21,15 @@ export function setLogLevel(level) {
   }
 }
 
+/** Config-file level; LOG_LEVEL env var, when set, still wins */
+export function setConfigLogLevel(level) {
+  if (!envLevel) setLogLevel(String(level || '').toLowerCase());
+}
+
+export function isDebug() {
+  return currentLevel >= LEVELS.debug;
+}
+
 export function error(...args) {
   if (currentLevel >= LEVELS.error) {
     console.error('[ERROR]', ...args);
@@ -51,4 +60,4 @@ export function success(...args) {
   }
 }
 
-export default { error, warn, info, debug, success, setLogLevel };
+export default { error, warn, info, debug, success, setLogLevel, setConfigLogLevel, isDebug };

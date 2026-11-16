@@ -884,6 +884,20 @@ export function getSchedulerTools() {
         required: ['chatId'],
       },
     },
+    {
+      name: 'deleteJob',
+      description: 'Permanently delete a recurring (master) job and its remaining reminders for today, so it never fires again. Use only when Hiro clearly asks to delete/stop a reminder forever ("xoá mãi mãi", "bỏ luôn", "không nhắc nữa"). CRITICAL: call listMasterJobs first and pass the exact "id" from its result; call once per job if several match.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          jobId: {
+            type: 'string',
+            description: 'Exact master job id from listMasterJobs',
+          },
+        },
+        required: ['jobId'],
+      },
+    },
   ];
 }
 

@@ -4,10 +4,14 @@
  */
 
 import logger from '../utils/logger.js';
-import { getTodayJobs, markFired, deletePastTodayJobs } from './db.js';
+import { getTodayJobs, claimJob, unclaimJob, deletePastTodayJobs } from './db.js';
 import { getWeather, formatWeather } from '../tools/providers/weather/index.js';
 import { broadcastVoiceEvent } from '../channels/voice/server.js';
 import { synthesize } from '../services/voiceService.js';
+import { loadConfig } from '../config/index.js';
+
+// Read once at startup; voice is opt-in via config.voice.enabled
+const VOICE_ENABLED = loadConfig().voice?.enabled === true;
 
 /**
  * Synthesize a reminder's audio and push it to connected voice dashboards.
@@ -16,6 +20,7 @@ import { synthesize } from '../services/voiceService.js';
  * @param {string} text
  */
 async function pushVoiceReminder(text) {
+  if (!VOICE_ENABLED) return;
   let audio = null;
   try {
     const { audioBuffer } = await synthesize(text);
@@ -27,6 +32,7 @@ async function pushVoiceReminder(text) {
 }
 
 let pollerInterval = null;
+let tickInFlight = false;
 
 /**
  * Start the polling loop
@@ -42,11 +48,17 @@ export function startPoller(sendMessage) {
   logger.info('[Scheduler] Starting poller (every 3 seconds)');
 
   pollerInterval = setInterval(async () => {
+    // A tick that sends (weather fetch, Telegram, TTS) can take longer than
+    // 3s; overlapping ticks used to re-read the still-unfired job and send it
+    // again (the 3x weather / 2x water duplicates).
+    if (tickInFlight) return;
+    tickInFlight = true;
     try {
-      // logger.debug('[Scheduler] Poller tick...');
       await checkAndFire(sendMessage);
     } catch (err) {
       logger.error('[Scheduler] Poller error:', err.message);
+    } finally {
+      tickInFlight = false;
     }
   }, 3000); // 3 seconds
 }
@@ -100,6 +112,8 @@ export async function checkAndFire(sendMessage) {
 
   // Fire each due job
   for (const job of dueJobs) {
+    // Claim first: exactly one sender per job, even across processes.
+    if (!claimJob(job.id)) continue;
     try {
       // Check if this is a tool_call action (e.g., weather)
       if (job.action?.type === 'tool_call') {
@@ -114,10 +128,7 @@ export async function checkAndFire(sendMessage) {
           await sendMessage(job.chat_id, weatherText);
 
           // Additive push to any connected voice dashboard — Telegram delivery above is unaffected
-          await pushVoiceReminder(weatherText);
-
-          // Mark as fired
-          markFired(job.id);
+          pushVoiceReminder(weatherText).catch(() => {});
 
           logger.success(`[Scheduler] Fired weather tool: ${job.name} to chat ${job.chat_id}`);
           continue;
@@ -125,7 +136,6 @@ export async function checkAndFire(sendMessage) {
 
         // Unknown tool
         logger.warn(`[Scheduler] Unknown tool: ${tool} in job ${job.id}`);
-        markFired(job.id); // Mark as fired to avoid retries
         continue;
       }
 
@@ -143,8 +153,14 @@ export async function checkAndFire(sendMessage) {
         safeButtons = [buttons]; // Wrap 1D array into 2D array
       }
 
+      // The Cancel button (!act:delete) permanently deleted the recurring job
+      // and was removed; strip it from jobs created before that
+      const keptButtons = safeButtons
+        .map(row => row.filter(btn => !String(btn.callback_data || '').startsWith('!act:delete:')))
+        .filter(row => row.length > 0);
+
       // Replace {todayJobId} and <<refId>> placeholder in button callback_data
-      const processedButtons = safeButtons.map(row =>
+      const processedButtons = keptButtons.map(row =>
         row.map(btn => ({
           ...btn,
           callback_data: btn.callback_data
@@ -164,15 +180,13 @@ export async function checkAndFire(sendMessage) {
       });
 
       // Additive push to any connected voice dashboard — Telegram delivery above is unaffected
-      await pushVoiceReminder(job.message);
-
-      // Mark as fired
-      markFired(job.id);
+      pushVoiceReminder(job.message).catch(() => {});
 
       logger.success(`[Scheduler] Fired: ${job.name} to chat ${job.chat_id}`);
     } catch (err) {
       logger.error(`[Scheduler] Failed to fire job ${job.id}:`, err.message);
-      // Don't mark as fired if send failed - will retry in next poll
+      // Release the claim so the next tick retries
+      unclaimJob(job.id);
     }
   }
 }

@@ -26,7 +26,10 @@ export function createClient(botToken, apiRoot = '') {
     throw new Error('Telegram bot token required');
   }
 
-  const bot = apiRoot ? new Bot(botToken, { client: { apiRoot } }) : new Bot(botToken);
+  // grammY default per-request timeout is 500s; a stuck send would hold the
+  // scheduler tick (and every later reminder) for that long (must exceed the 30s getUpdates long-poll)
+  const clientOpts = { timeoutSeconds: 60, ...(apiRoot ? { apiRoot } : {}) };
+  const bot = new Bot(botToken, { client: clientOpts });
   let isRunning = false;
 
   return {
@@ -124,6 +127,15 @@ export function createClient(botToken, apiRoot = '') {
         }
       });
 
+      // Daily brief on demand: /brief [today|tomorrow]
+      bot.command('brief', async (ctx) => {
+        if (handlers.onBrief) {
+          await handlers.onBrief(ctx);
+        } else {
+          await replyTo(ctx, 'Brief not available.');
+        }
+      });
+
       // Default message handler — registered after commands so commands take priority
       if (handlers.onMessage) {
         bot.on('message:text', async (ctx) => {
@@ -159,6 +171,7 @@ export function createClient(botToken, apiRoot = '') {
               { command: 'task_today', description: 'List today\'s tasks' },
               { command: 'check_be',    description: 'Check PM2 and Docker status' },
               { command: 'be_snapshot', description: 'Save current PM2 and Docker state as baseline' },
+              { command: 'brief',       description: 'Important study/work/admin items: /brief [today|tomorrow]' },
             ]);
             console.log('[ziron] Telegram commands registered');
           } catch (err) {

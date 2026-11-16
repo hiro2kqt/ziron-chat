@@ -3,6 +3,9 @@
  * Start bot, status, test commands
  */
 
+import { initDailyBrief, buildBrief } from '../services/dailyBrief.js';
+import { utcTimeToLocal, formatLocal } from '../utils/time.js';
+import { shiftUtcTime } from '../scheduler/sync.js';
 import { loadConfig, getForcedChatId } from '../config/index.js';
 import { setReplyConfig, replyTo, typingTo } from '../channels/telegram/reply.js';
 import { createClient, validateBotToken } from '../channels/telegram/index.js';
@@ -155,14 +158,36 @@ export async function connectCommand() {
             await replyTo(ctx, 'No tasks configured.');
             return;
           }
+          // Master times are UTC computed with tz_offset_min; that offset
+          // recovers the intended local wall-clock time
           const lines = jobs.map(j => {
-            const times = j.time_triggers.join(', ') || '—';
+            const times = (j.time_triggers || [])
+              .map(t => shiftUtcTime(t.time, j.tz_offset_min ?? 120).slice(0, 5))
+              .join(', ') || '—';
             return `• ${j.name} [${times}]`;
           });
           await replyTo(ctx, `📋 Scheduled tasks:\n\n${lines.join('\n')}`);
         } catch (err) {
           logger.error('Failed to list tasks:', err.message);
           await replyTo(ctx, '❌ Failed to retrieve tasks.');
+        }
+      },
+
+      onBrief: async (ctx) => {
+        try {
+          const arg = String(ctx.match || '').trim().toLowerCase();
+          // Command args are English, like the commands themselves: /brief [today|tomorrow]
+          const kind = /^(tomorrow|tmr)$/.test(arg) ? 'evening' : 'morning';
+          await replyTo(ctx, '⏳ Đang tổng hợp...');
+          const text = await buildBrief(kind, config);
+          try {
+            await replyTo(ctx, text, { parse_mode: 'Markdown' });
+          } catch {
+            await replyTo(ctx, text);
+          }
+        } catch (err) {
+          logger.error('Brief failed:', err.message);
+          await replyTo(ctx, '❌ Không tạo được bản tóm tắt.');
         }
       },
 
@@ -175,7 +200,7 @@ export async function connectCommand() {
           }
           const lines = jobs.map(j => {
             const status = j.fired ? '✅' : '⏳';
-            return `${status} ${j.name} @ ${j.fire_at}`;
+            return `${status} ${j.name} @ ${utcTimeToLocal(j.fire_at, j.date)}`;
           });
           await replyTo(ctx, `📅 Today's tasks:\n\n${lines.join('\n')}`);
         } catch (err) {
@@ -199,7 +224,7 @@ export async function connectCommand() {
       onBeSnapshot: async (ctx) => {
         try {
           const doc = await takeSnapshot(config.database?.mongoUri);
-          const ts = new Date(doc.createdAt).toLocaleString();
+          const ts = formatLocal(doc.createdAt);
           await replyTo(ctx,
             `📸 Snapshot saved\n\n` +
             `PM2 processes: ${doc.pm2.length}\n` +
@@ -220,10 +245,21 @@ export async function connectCommand() {
       if (!text || text.trim() === '') {
         return; // Don't send empty messages
       }
-      await client.sendMessage(forcedChatId ?? chatId, text, {
-        parse_mode: 'Markdown',
-        ...options,
-      });
+      const target = forcedChatId ?? chatId;
+      const opts = { parse_mode: 'Markdown', ...options };
+      try {
+        await client.sendMessage(target, text, opts);
+      } catch (err) {
+        // Same fallback as chat replies: if Markdown can't be parsed, send the
+        // text plain instead of losing the reminder / email notification
+        if (opts.parse_mode && /can't parse entities/i.test(err.message || '')) {
+          logger.warn('Markdown parse failed, sending plain text');
+          const { parse_mode, ...plain } = opts;
+          await client.sendMessage(target, text, plain);
+        } else {
+          throw err;
+        }
+      }
     };
 
     try {
@@ -241,6 +277,13 @@ export async function connectCommand() {
       logger.warn('Bot will continue without email monitoring');
     }
 
+    // Morning (today) / evening (tomorrow) brief from email + scheduler
+    try {
+      initDailyBrief(sendMessage, config);
+    } catch (err) {
+      logger.error('Daily brief initialization failed:', err.message);
+    }
+
     // Start BE watcher
     try {
       initBeWatcher(sendMessage, config);
@@ -251,11 +294,15 @@ export async function connectCommand() {
 
     // Start voice channel server (REST chat + SSE reminders for the browser dashboard).
     // Runs in this same process so it can receive the scheduler's "job due" push above.
-    try {
-      startVoiceServer();
-    } catch (err) {
-      logger.error('Voice server initialization failed:', err.message);
-      logger.warn('Bot will continue without the voice channel');
+    if (config.voice?.enabled) {
+      try {
+        startVoiceServer();
+      } catch (err) {
+        logger.error('Voice server initialization failed:', err.message);
+        logger.warn('Bot will continue without the voice channel');
+      }
+    } else {
+      logger.info('[Voice] Disabled in config (voice.enabled = false)');
     }
 
     // Register callback query handler for scheduler buttons

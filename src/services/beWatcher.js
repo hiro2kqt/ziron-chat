@@ -3,6 +3,7 @@
  * Queries PM2 and Docker state, manages baseline snapshots, diffs status.
  */
 
+import { formatLocal } from '../utils/time.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { connectMongo } from '../db/mongo.js';
@@ -172,7 +173,7 @@ export function formatStatusMessage(statusResult) {
 
   const allUp = results.every(r => !r.isDown);
   const header = allUp ? '✅ All services running' : '🚨 Service issues detected';
-  const ts = new Date(snapshot.createdAt).toLocaleString();
+  const ts = formatLocal(snapshot.createdAt);
 
   const message = `${header}\n\n${lines.join('\n')}\n\nBaseline: ${ts}`;
   logger.debug('[BeWatcher] Message: ' + message);
@@ -212,6 +213,9 @@ export function initBeWatcher(sendMessage, config) {
   }
 
   let firstTick = true;
+  // Only alert when the set of down services changes; re-sending the same
+  // alert every interval for a service stopped on purpose is just noise.
+  let lastDownKey = '';
 
   const tick = async () => {
     if (firstTick) {
@@ -226,6 +230,15 @@ export function initBeWatcher(sendMessage, config) {
         return;
       }
       const down = result.results.filter(r => r.isDown);
+      const downKey = down.map(r => `${r.name}|${r.current}`).sort().join(',');
+      if (downKey === lastDownKey) return;
+      const recovered = lastDownKey && down.length === 0;
+      lastDownKey = downKey;
+      if (recovered) {
+        const forced = getForcedChatId(config);
+        if (forced) await sendMessage(forced, '✅ Service alert cleared — all watched services are up');
+        return;
+      }
       if (down.length > 0) {
         const msg = formatAlertMessage(down);
         // When forced, send exactly once — the loop would otherwise send N

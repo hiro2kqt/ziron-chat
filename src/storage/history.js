@@ -280,11 +280,12 @@ export async function truncateAndSummarize(sessionId, summaryText) {
 export async function buildApiMessages(sessionId) {
   const messages = await loadSession(sessionId);
 
-  // Find last compact boundary
+  // Find last compact boundary. The boundary IS the summary message: start
+  // from it (not after it) so the summary of older turns stays in context.
   let startIndex = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].isCompactBoundary) {
-      startIndex = i + 1;
+      startIndex = i;
       break;
     }
   }
@@ -294,8 +295,14 @@ export async function buildApiMessages(sessionId) {
   const result = [];
 
   for (const msg of relevantMessages) {
-    // Skip summary messages
+    // Summary of compacted history -> leading user message
     if (msg.role === 'summary') {
+      if (result.length === 0) {
+        result.push({
+          role: 'user',
+          content: `[Summary of the earlier conversation, for context only]\n${msg.content}`,
+        });
+      }
       continue;
     }
 

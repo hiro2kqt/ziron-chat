@@ -44,13 +44,26 @@ export const DEFAULT_CONFIG = {
   beWatcher: {
     intervalMinutes: 5,
   },
+  // Morning brief (today) + evening brief (tomorrow), local times
+  dailyBrief: {
+    enabled: true,
+    morning: '07:00',
+    evening: '21:00',
+  },
+  // Voice channel (HTTP server + TTS reminder push). Off by default: when on,
+  // it shares the Telegram bot's process.
+  voice: {
+    enabled: false,
+  },
   tools: {
     weather: {
       googleApiKey: '',
     },
     email: {
       enabled: false,
-      pollIntervalHours: 2,
+      pollIntervalMinutes: 15,
+      // Model for email triage; falls back to providers.openrouter.model
+      classifierModel: '',
       startDate: '',
       imap: {
         host: '',

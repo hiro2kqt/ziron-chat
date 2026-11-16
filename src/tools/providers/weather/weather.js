@@ -29,7 +29,7 @@ export async function fetchWeather({ lat, lon, apiKey }) {
   url.searchParams.append("unitsSystem", "METRIC");
 
   try {
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), { signal: AbortSignal.timeout(20000) });
 
     if (!response.ok) {
       const error = await response.text();

@@ -1,6 +1,14 @@
 /**
  * Memory Extraction System
- * Automatically extracts and persists long-term memories from conversations
+ *
+ * Every few messages, looks at the messages added since the last extraction
+ * and rewrites each memory file as a short, de-duplicated list of durable
+ * facts. Files are rewritten (not appended), so contradictions and stale facts
+ * get replaced instead of piling up.
+ *
+ * Files: ~/.ziron/memory/{user,feedback,project,reference}.md
+ * Index: ~/.ziron/memory/MEMORY.md (all files concatenated; injected into the system prompt)
+ * Cursor: ~/.ziron/memory/.state.json ({ sessions: { [sessionId]: lastMessageId } })
  */
 
 import fs from 'node:fs/promises';
@@ -17,329 +25,255 @@ import logger from '../utils/logger.js';
 const MEMORY_EXTRACTION_INTERVAL = 3; // Extract memory every N messages
 const MEMORY_DIR = path.join(os.homedir(), '.ziron', 'memory');
 const MEMORY_INDEX_FILE = path.join(MEMORY_DIR, 'MEMORY.md');
-const MEMORY_PREVIEW_LENGTH = 500; // Characters to show in index
+const STATE_FILE = path.join(MEMORY_DIR, '.state.json');
+const MAX_ITEMS_PER_TYPE = 15;
+const MAX_NEW_CONVERSATION_CHARS = 12000; // cap per extraction call
 
-// Memory file mapping
-const MEMORY_FILES = {
-  user: path.join(MEMORY_DIR, 'user.md'),
-  feedback: path.join(MEMORY_DIR, 'feedback.md'),
-  project: path.join(MEMORY_DIR, 'project.md'),
-  reference: path.join(MEMORY_DIR, 'reference.md'),
-};
+const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'];
+const MEMORY_FILES = Object.fromEntries(MEMORY_TYPES.map(t => [t, path.join(MEMORY_DIR, `${t}.md`)]));
+const TITLES = { user: 'User', feedback: 'Feedback', project: 'Project', reference: 'Reference' };
 
 // ============================================================================
 // Public API
 // ============================================================================
 
 /**
- * Check if memory extraction should be triggered
- * @param {number} messageCount - Current message count for the session
- * @returns {boolean} True if should extract memory
+ * Check if memory extraction should run
+ * @param {number} messageCount - Total messages in session
+ * @returns {boolean}
  */
 export function shouldExtractMemory(messageCount) {
   return messageCount > 0 && messageCount % MEMORY_EXTRACTION_INTERVAL === 0;
 }
 
 /**
- * Extract memory from a conversation session
- * Runs a background LLM call to identify what's worth remembering
- *
- * @param {string} sessionId - Session to extract from
- * @param {Object} provider - LLM provider instance (must have .chat() method)
- * @returns {Promise<Object|null>} Extracted memory object or null if nothing to save
+ * Extract memory from the messages added since the last extraction
+ * @param {string} sessionId
+ * @param {Object} provider - LLM provider with chat() method
+ * @returns {Promise<Object|null>} Rewritten files, or null if nothing changed
  */
 export async function extractMemory(sessionId, provider) {
   try {
-    logger.info(`[Memory] Extracting from session ${sessionId.substring(0, 8)}...`);
-
-    // 1. Load conversation history
     const messages = await loadSession(sessionId);
+    if (messages.length === 0) return null;
 
-    if (messages.length === 0) {
-      logger.debug('[Memory] No messages to extract from');
+    const state = await loadState();
+    const lastId = state.sessions[sessionId];
+    const lastIdx = lastId ? messages.findIndex(m => m.id === lastId) : -1;
+    const newMessages = messages.slice(lastIdx + 1);
+    const conversationText = formatConversation(newMessages);
+
+    // Advance the cursor even if nothing is learned, so the same messages are
+    // never sent to the LLM twice
+    const advanceCursor = async () => {
+      state.sessions[sessionId] = messages[messages.length - 1].id;
+      await saveState(state);
+    };
+
+    if (!conversationText) {
+      await advanceCursor();
       return null;
     }
 
-    // 2. Load current memory index
-    const currentMemory = await loadMemoryIndex();
+    logger.info(`[Memory] Extracting from ${newMessages.length} new message(s) in session ${sessionId.substring(0, 8)}...`);
 
-    // 3. Format conversation for extraction
-    const conversationText = formatConversationForExtraction(messages);
-
-    // 4. Build extraction prompt
-    const extractionPrompt = buildExtractionPrompt(currentMemory, conversationText);
-
-    // 5. Call LLM to extract memory (direct provider call, no history)
+    const current = await loadMemoryFiles();
+    const prompt = buildExtractionPrompt(current, conversationText);
     const response = await provider.chat({
-      system: extractionPrompt.system,
-      messages: extractionPrompt.messages,
-      max_tokens: 2000,
+      system: prompt.system,
+      messages: prompt.messages,
+      max_tokens: 3000,
     });
 
-    // 6. Parse response
-    const extracted = parseExtractionResponse(response);
-
-    if (!extracted) {
-      logger.debug('[Memory] Nothing worth saving');
-      return null;
+    const updates = parseExtractionResponse(response, current);
+    if (updates) {
+      await writeMemory(updates);
+      logger.success(`[Memory] Rewrote: ${Object.keys(updates).join(', ')}`);
+    } else {
+      logger.debug('[Memory] Nothing new worth saving');
     }
 
-    // 7. Write to memory files
-    await writeMemory(extracted);
-
-    logger.success('[Memory] Extraction complete');
-    return extracted;
-
+    await advanceCursor();
+    return updates;
   } catch (err) {
     logger.error('[Memory] Extraction failed:', err.message);
-    // Don't throw - memory extraction should never crash the main flow
     return null;
   }
 }
 
+/**
+ * Rebuild MEMORY.md from the individual files (also usable after manual edits)
+ * @returns {Promise<void>}
+ */
+export async function rebuildMemoryIndex() {
+  const current = await loadMemoryFiles();
+  const sections = ['# ZIRON Memory', ''];
+  for (const type of MEMORY_TYPES) {
+    sections.push(`## ${TITLES[type]}`, '');
+    sections.push(current[type].length ? current[type].map(i => `- ${i}`).join('\n') : '*(empty)*');
+    sections.push('');
+  }
+  await atomicWrite(MEMORY_INDEX_FILE, sections.join('\n'));
+  logger.debug('[Memory] Rebuilt MEMORY.md');
+}
+
 // ============================================================================
-// Internal Helpers
+// Internals
 // ============================================================================
 
-/**
- * Load current memory index content
- * @returns {Promise<string>} Memory index content or empty string
- */
-async function loadMemoryIndex() {
+async function loadState() {
   try {
-    const content = await fs.readFile(MEMORY_INDEX_FILE, 'utf-8');
-    return content.trim();
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      return '';
-    }
-    throw err;
+    const parsed = JSON.parse(await fs.readFile(STATE_FILE, 'utf-8'));
+    return { sessions: parsed.sessions || {} };
+  } catch {
+    return { sessions: {} };
   }
 }
 
+async function saveState(state) {
+  await fs.mkdir(MEMORY_DIR, { recursive: true, mode: 0o700 });
+  await atomicWrite(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
 /**
- * Format conversation messages for extraction prompt
- * @param {Array} messages - Message objects from storage
- * @returns {string} Formatted conversation text
+ * Read each memory file as a list of bullet items
+ * @returns {Promise<Object<string, string[]>>}
  */
-function formatConversationForExtraction(messages) {
+async function loadMemoryFiles() {
+  const out = {};
+  for (const type of MEMORY_TYPES) {
+    try {
+      const text = await fs.readFile(MEMORY_FILES[type], 'utf-8');
+      out[type] = text.split('\n')
+        .filter(l => /^\s*-\s+/.test(l))
+        .map(l => l.replace(/^\s*-\s+/, '').trim())
+        .filter(Boolean);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      out[type] = [];
+    }
+  }
+  return out;
+}
+
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.filter(b => b?.type === 'text').map(b => b.text).join('\n');
+  }
+  return '';
+}
+
+/**
+ * Only the human-readable turns (no tool calls/results), newest kept if long
+ * @param {Array} messages
+ * @returns {string}
+ */
+function formatConversation(messages) {
   const lines = [];
-
   for (const msg of messages) {
-    if (msg.role === 'user') {
-      lines.push(`Hiro: ${msg.content}`);
-    } else if (msg.role === 'assistant') {
-      lines.push(`ZIRON: ${msg.content}`);
-    }
-    // Skip tool_use, tool_result, summary messages
+    if (msg.compactCopy) continue; // already seen before compaction
+    const text = textOf(msg.content).trim();
+    if (!text) continue;
+    if (msg.role === 'user') lines.push(`Hiro: ${text}`);
+    else if (msg.role === 'assistant') lines.push(`ZIRON: ${text}`);
   }
-
-  return lines.join('\n\n');
+  const joined = lines.join('\n\n');
+  return joined.length > MAX_NEW_CONVERSATION_CHARS
+    ? joined.slice(-MAX_NEW_CONVERSATION_CHARS)
+    : joined;
 }
 
-/**
- * Build the extraction prompt for the LLM
- * @param {string} currentMemory - Current memory index content
- * @param {string} conversationText - Formatted conversation
- * @returns {Object} Prompt object with system and messages
- */
-function buildExtractionPrompt(currentMemory, conversationText) {
-  const system = `You are ZIRON's memory manager. Your only job is to analyze conversations and extract information worth remembering long-term.
+function buildExtractionPrompt(current, conversationText) {
+  const system = `You are ZIRON's memory manager. You maintain four short lists of durable facts about Hiro.
 
-Memory types:
-- user: Who Hiro is — role, goals, preferences, habits, background, CRITICAL: EXPLICIT TIMEZONE OFFSET (e.g. GMT+7, UTC-5), locations
-- feedback: How ZIRON should behave — what Hiro liked, corrected, or complained about
-- project: Ongoing tasks, goals, deadlines, plans Hiro mentioned
-- reference: External resources Hiro mentioned (links, tools, services, people)
+Types:
+- user: who Hiro is — background, location, relationships, habits, preferences.
+- feedback: how ZIRON should behave — what Hiro liked, corrected or complained about.
+- project: long-running personal goals or projects (weeks to months).
+- reference: external resources Hiro relies on (tools, services, links, people to contact).
 
-Rules:
-- Only extract genuinely new information not already in current memory
-- Be specific and concrete, not vague
-- Convert relative dates to absolute (e.g. "next Thursday" → "2026-04-24")
-- Return null for a type if nothing new was learned
-- If nothing at all is worth saving, return {"nothing": true}`;
+NEVER store:
+- reminders, schedules, alarms, one-off tasks or dates of specific events — the scheduler database is the source of truth for those;
+- timezone offsets (GMT+N) — the system config provides the current timezone;
+- university course or module details, lecture or exam information — the email system handles those;
+- anything from the conversation that is temporary or already done.
 
-  const userPrompt = `Current memory:
-${currentMemory || '(No memory yet)'}
+For each type, decide whether the NEW conversation changes the list:
+- If not, return null for that type.
+- If yes, return the COMPLETE rewritten list: keep every still-valid existing item, merge duplicates,
+  replace items that the new conversation contradicts, drop outdated ones, add new durable facts.
+  Max ${MAX_ITEMS_PER_TYPE} items, each one concise sentence in English.`;
+
+  const fmt = items => (items.length ? items.map(i => `- ${i}`).join('\n') : '(empty)');
+  const user = `Current memory:
+${MEMORY_TYPES.map(t => `## ${t}\n${fmt(current[t])}`).join('\n\n')}
 
 ---
 
-Recent conversation:
+New conversation since the last update:
 ${conversationText}
 
 ---
 
-Extract what's worth remembering. Respond ONLY with valid JSON, no markdown, no explanation:
-{
-  "user": "string or null",
-  "feedback": "string or null",
-  "project": "string or null",
-  "reference": "string or null"
-}`;
+Respond ONLY with JSON, no markdown:
+{"user": [..] or null, "feedback": [..] or null, "project": [..] or null, "reference": [..] or null}`;
 
-  return {
-    system,
-    messages: [
-      { role: 'user', content: userPrompt }
-    ]
-  };
+  return { system, messages: [{ role: 'user', content: user }] };
 }
 
 /**
- * Parse LLM response and extract memory object
- * @param {Object} response - LLM response from provider.chat()
- * @returns {Object|null} Extracted memory or null
+ * @returns {Object<string, string[]>|null} only the types that changed
  */
-function parseExtractionResponse(response) {
-  try {
-    // Extract text from response
-    let text = '';
-    if (response.content && Array.isArray(response.content)) {
-      const textBlock = response.content.find(block => block.type === 'text');
-      if (textBlock) {
-        text = textBlock.text;
-      }
-    } else if (typeof response.content === 'string') {
-      text = response.content;
-    }
-
-    if (!text) {
-      logger.warn('[Memory] Empty response from LLM');
-      return null;
-    }
-
-    // Clean markdown code blocks if present
-    text = text.trim();
-    if (text.startsWith('```json')) {
-      text = text.replace(/```json\n?/g, '').replace(/```\n?$/g, '');
-    } else if (text.startsWith('```')) {
-      text = text.replace(/```\n?/g, '');
-    }
-
-    // Parse JSON
-    const parsed = JSON.parse(text);
-
-    // Check if nothing to save
-    if (parsed.nothing === true) {
-      return null;
-    }
-
-    // Filter out null/empty values
-    const extracted = {};
-    let hasContent = false;
-
-    for (const type of ['user', 'feedback', 'project', 'reference']) {
-      if (parsed[type] && typeof parsed[type] === 'string' && parsed[type].trim()) {
-        extracted[type] = parsed[type].trim();
-        hasContent = true;
-      }
-    }
-
-    return hasContent ? extracted : null;
-
-  } catch (err) {
-    logger.error('[Memory] Failed to parse extraction response:', err.message);
-    logger.debug('[Memory] Raw response:', JSON.stringify(response, null, 2));
+function parseExtractionResponse(response, current) {
+  let text = Array.isArray(response?.content)
+    ? textOf(response.content)
+    : (typeof response?.content === 'string' ? response.content : '');
+  text = (text || '').trim();
+  if (!text) {
+    logger.warn('[Memory] Empty response from LLM');
     return null;
   }
+  const m = text.match(/\{[\s\S]*\}/);
+  let parsed;
+  try {
+    parsed = JSON.parse(m ? m[0] : text);
+  } catch (err) {
+    logger.error('[Memory] Failed to parse extraction response:', err.message);
+    return null;
+  }
+
+  const updates = {};
+  for (const type of MEMORY_TYPES) {
+    const v = parsed[type];
+    if (!Array.isArray(v)) continue;
+    const items = [...new Set(v.map(s => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean))]
+      .slice(0, MAX_ITEMS_PER_TYPE);
+    // Guard against a model that "rewrites" a non-empty list into nothing
+    if (items.length === 0 && current[type].length > 0) continue;
+    if (JSON.stringify(items) === JSON.stringify(current[type])) continue;
+    updates[type] = items;
+  }
+  return Object.keys(updates).length ? updates : null;
 }
 
-/**
- * Write extracted memory to files and rebuild index
- * @param {Object} extracted - Extracted memory object with user/feedback/project/reference fields
- * @returns {Promise<void>}
- */
-async function writeMemory(extracted) {
-  // 1. Ensure memory directory exists
+async function writeMemory(updates) {
   await fs.mkdir(MEMORY_DIR, { recursive: true, mode: 0o700 });
-
-  // 2. Append to individual memory files
-  const timestamp = new Date().toISOString();
-
-  for (const [type, content] of Object.entries(extracted)) {
-    const filePath = MEMORY_FILES[type];
-    if (!filePath || !content) continue;
-
+  for (const [type, items] of Object.entries(updates)) {
+    const body = `# ${TITLES[type]}\n\n${items.map(i => `- ${i}`).join('\n')}\n`;
     try {
-      // Read existing content
-      let existing = '';
-      try {
-        existing = await fs.readFile(filePath, 'utf-8');
-      } catch (err) {
-        if (err.code !== 'ENOENT') throw err;
-      }
-
-      // Build new content with timestamp header
-      const entry = `\n## ${timestamp}\n\n${content}\n`;
-      const newContent = existing + entry;
-
-      // Atomic write: write to temp file, then rename
-      const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-      await fs.writeFile(tempPath, newContent, { encoding: 'utf-8', mode: 0o600 });
-      await fs.rename(tempPath, filePath);
-
-      logger.debug(`[Memory] Updated ${type}.md`);
-
+      await atomicWrite(MEMORY_FILES[type], body);
     } catch (err) {
       logger.error(`[Memory] Failed to write ${type}.md:`, err.message);
     }
   }
-
-  // 3. Rebuild MEMORY.md index
   await rebuildMemoryIndex();
 }
 
-/**
- * Rebuild the MEMORY.md index from individual memory files
- * @returns {Promise<void>}
- */
-async function rebuildMemoryIndex() {
-  const timestamp = new Date().toISOString();
-  const sections = [];
-
-  sections.push('# ZIRON Memory Index');
-  sections.push(`Last updated: ${timestamp}`);
-  sections.push('');
-
-  // Read preview of each memory file
-  for (const [type, filePath] of Object.entries(MEMORY_FILES)) {
-    const title = type.charAt(0).toUpperCase() + type.slice(1);
-    sections.push(`## ${title}`);
-    sections.push('');
-
-    try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      const preview = content.trim().substring(0, MEMORY_PREVIEW_LENGTH);
-
-      if (preview) {
-        sections.push(preview);
-        if (content.length > MEMORY_PREVIEW_LENGTH) {
-          sections.push('');
-          sections.push('*(continued in file...)*');
-        }
-      } else {
-        sections.push('*(empty)*');
-      }
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        sections.push('*(empty)*');
-      } else {
-        logger.error(`[Memory] Failed to read ${type}.md:`, err.message);
-        sections.push('*(error reading file)*');
-      }
-    }
-
-    sections.push('');
-  }
-
-  // Write index file atomically
-  const indexContent = sections.join('\n');
-  const tempPath = `${MEMORY_INDEX_FILE}.${process.pid}.${randomUUID()}.tmp`;
-
-  await fs.writeFile(tempPath, indexContent, { encoding: 'utf-8', mode: 0o600 });
-  await fs.rename(tempPath, MEMORY_INDEX_FILE);
-
-  logger.debug('[Memory] Rebuilt MEMORY.md index');
+async function atomicWrite(filePath, content) {
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode: 0o600 });
+  await fs.rename(tempPath, filePath);
 }
 
 // ============================================================================
@@ -349,4 +283,5 @@ async function rebuildMemoryIndex() {
 export default {
   shouldExtractMemory,
   extractMemory,
+  rebuildMemoryIndex,
 };

@@ -1,18 +1,18 @@
 # Ziron
 
-Minimal AI assistant - Telegram Bot + OpenRouter integration.
+Personal assistant on Telegram: chat agent with reminders, university mail triage and daily briefs, backed by OpenRouter.
 
-A clean, lightweight implementation that connects Telegram bots to AI models via OpenRouter.
+**Full documentation: [`docs/SYSTEM_OVERVIEW.md`](docs/SYSTEM_OVERVIEW.md)** — architecture, flows, data model, time model, config, operations, verification recipes.
 
 ## Features
 
-- ✅ **Telegram Bot API** (via Grammy)
-- ✅ **OpenRouter** integration (Claude, GPT-4, 200+ models)
-- ✅ **OpenAI** integration (API key or OAuth)
-- ✅ **OAuth support** (ChatGPT Plus / OpenAI Codex)
-- ✅ **JSON config** (auto-generated)
-- ✅ **Config management** CLI commands
-- ✅ Clean JavaScript codebase (~1,300 LOC)
+- **Chat agent** (Telegram, grammY) with tools: reminders, weather, email search
+- **Reminders**: one-shot / interval / recurring, Done & Snooze buttons, DST-safe (UTC storage)
+- **University mail**: IMAP IDLE push → LLM classification → instant alert with "show full mail" and "remind me before the deadline" buttons
+- **Daily brief**: 07:00 (today) and 21:00 (tomorrow) study/work/admin summary from mail + scheduler, `/brief [today|tomorrow]`
+- **Memory** (compact, rewritten fact lists) and **history compaction** (~8k-token threshold)
+- **Service watcher** for PM2 / Docker (alerts on state change)
+- OpenRouter with private routing (`data_collection: deny`); default model DeepSeek V4.1 Flash
 
 ## Quick Start
 

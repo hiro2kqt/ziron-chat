@@ -9,9 +9,9 @@ import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { loadConfig, getForcedChatId } from './config/index.js';
 import { toGmtString, utcTimeToLocal } from './utils/time.js';
-import { PRIVATE_ROUTING } from './providers/openrouter.js';
+import { PRIVATE_ROUTING, logUsage } from './providers/openrouter.js';
 import { shiftUtcTime } from './scheduler/sync.js';
-import { createSession, appendMessage, buildApiMessages } from './storage/history.js';
+import { createSession, appendMessage, buildApiMessages, saveSessionImage } from './storage/history.js';
 import { createClient } from './api/client.js';
 import { buildSystemPrompt } from './prompts/system.js';
 import { shouldExtractMemory, extractMemory } from './memory/extractor.js';
@@ -46,7 +46,8 @@ import logger from './utils/logger.js';
  * @typedef {Object} HandleMessageParams
  * @property {'telegram'|'cli'} channelType - Channel type
  * @property {string|number} channelId - Channel-specific ID (chat ID for Telegram)
- * @property {string} userMessage - User's message text
+ * @property {string} userMessage - User's message text (caption for photos)
+ * @property {Array<{data: Buffer, mime: string}>} [images] - Attached photos
  */
 
 /**
@@ -170,11 +171,19 @@ function incrementSessionMessageCount(sessionId) {
   return newCount;
 }
 
+/** JSON for logs/dumps with image data URLs shortened (they are megabytes of base64) */
+function redactImages(value) {
+  return JSON.stringify(value, (k, v) =>
+    (k === 'url' && typeof v === 'string' && v.startsWith('data:'))
+      ? `${v.slice(0, v.indexOf(',') + 1)}…(${v.length} chars)`
+      : v, 2);
+}
+
 /**
  * OpenRouter provider adapter for ZironClient
  * Adapts existing OpenRouter API to LLMProvider interface
  */
-class OpenRouterProviderAdapter {
+export class OpenRouterProviderAdapter {
   constructor(apiKey, model, maxTokens) {
     this.apiKey = apiKey;
     this.model = model || 'anthropic/claude-3.5-sonnet';
@@ -213,6 +222,7 @@ class OpenRouterProviderAdapter {
         // User message: check for tool_result blocks
         if (Array.isArray(msg.content)) {
           const textBlocks = msg.content.filter(b => b.type === 'text');
+          const imageBlocks = msg.content.filter(b => b.type === 'image');
           const toolResultBlocks = msg.content.filter(b => b.type === 'tool_result');
 
           // Add tool results as tool messages FIRST
@@ -227,7 +237,19 @@ class OpenRouterProviderAdapter {
           }
 
           // Add text content as user message AFTER tool results
-          if (textBlocks.length > 0) {
+          if (imageBlocks.length > 0) {
+            // Multimodal: OpenAI content parts with data URLs
+            result.push({
+              role: 'user',
+              content: [
+                ...textBlocks.map(b => ({ type: 'text', text: b.text })),
+                ...imageBlocks.map(b => ({
+                  type: 'image_url',
+                  image_url: { url: `data:${b.mediaType};base64,${b.data}` },
+                })),
+              ],
+            });
+          } else if (textBlocks.length > 0) {
             result.push({
               role: 'user',
               content: textBlocks.map(b => b.text).join('\n'),
@@ -317,7 +339,7 @@ class OpenRouterProviderAdapter {
     logger.info(`[LLM OUT] Gửi yêu cầu lên OpenRouter (${this.model})...`);
     logger.info(`[LLM OUT] System Prompt dài ${system.length} kí tự.`);
     // Full message dump only in debug: it is the whole history every call
-    logger.debug(`[LLM OUT] Tin nhắn gửi lên:`, JSON.stringify(convertedMessages, null, 2));
+    logger.debug(`[LLM OUT] Tin nhắn gửi lên:`, redactImages(convertedMessages));
 
     // Dump full payload to ~/.ziron/prompts only when settings.logLevel = "debug"
     if (logger.isDebug()) try {
@@ -330,7 +352,7 @@ class OpenRouterProviderAdapter {
         mkdirSync(debugPath, { recursive: true });
       }
       
-      writeFileSync(join(debugPath, filename), JSON.stringify(payload, null, 2));
+      writeFileSync(join(debugPath, filename), redactImages(payload));
       logger.info(`[Gateway] Đã lưu full payload vào file: ${join(debugPath, filename)}`);
     } catch (e) {
       // Ignore
@@ -353,6 +375,7 @@ class OpenRouterProviderAdapter {
     }
 
     const data = await response.json();
+    logUsage('chat', data);
 
     if (!data.choices || !data.choices[0]) {
       throw new Error('Invalid API response: no choices');
@@ -669,7 +692,7 @@ export async function handleMessage(params) {
     throw new Error('No AI provider configured');
   }
 
-  const { channelType, channelId, userMessage } = params;
+  const { channelType, channelId, userMessage, images = [] } = params;
 
   // Get or create session for this channel
   const sessionId = getOrCreateSession(channelType, channelId);
@@ -878,12 +901,19 @@ export async function handleMessage(params) {
   };
 
   // Use ZironClient to handle the conversation
+  // Photos from the channel: stored under ~/.ziron/media/<session>/, history keeps the paths
+  const storedImages = [];
+  for (const img of images) {
+    storedImages.push(await saveSessionImage(sessionId, img.data, img.mime));
+  }
+
   const response = await gatewayState.client.run({
     sessionId,
     userMessage,
     systemPrompt,
     tools,
     onToolCall,
+    images: storedImages,
   });
 
   // Memory extraction (background, non-blocking)

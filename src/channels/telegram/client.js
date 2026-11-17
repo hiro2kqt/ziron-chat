@@ -149,6 +149,18 @@ export function createClient(botToken, apiRoot = '') {
         });
       }
 
+      // Photos (compressed, or image files sent as documents)
+      if (handlers.onPhoto) {
+        bot.on(['message:photo', 'message:document'], async (ctx) => {
+          try {
+            await handlers.onPhoto(ctx);
+          } catch (err) {
+            logger.error('Photo handler error:', err);
+            await replyTo(ctx, 'Sorry, an error occurred processing your photo.');
+          }
+        });
+      }
+
       // Error handler
       bot.catch((err) => {
         logger.error('Bot error:', err);

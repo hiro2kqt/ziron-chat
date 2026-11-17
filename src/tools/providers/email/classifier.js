@@ -53,39 +53,74 @@ export const RESPONSE_SCHEMA = {
   },
 };
 
-export function buildPrompt({ from, subject, snippet, date }) {
+// Rules agreed with the student (2026-11-17); the eval set in docs §11 follows them.
+// Static text first, the email last: the shared prefix is served from the provider's prompt cache.
+export function buildPrompt({ from, subject, snippet, date, studentName = '' }) {
+  const student = studentName ? `the student (${studentName})` : 'the student';
   return `You triage the university inbox of an MSc Data Science student at TU Dortmund.
 Emails may be German or English. ALWAYS write "summary" and "reason" in English.
+A false negative (a missed important mail) is much worse than an extra notification: when a mail
+plausibly needs the student's attention under the rules below, mark it important.
 
 The student's programme modules:${PROGRAM_MODULES}
 
 IMPORTANT (important = true):
 - "registration": registration / enrolment / place allocation for courses, seminars, case studies,
-  programming courses, project work, or exams (Anmeldung, Kursplatz, Platzvergabe, Abmeldung).
-- "exam": exam or quiz dates, rooms, allowed resources, results, reviews (Klausur, Prüfung, Einsicht).
-- "assignment": exercise sheets, homework, submissions, due / overdue notices (Übungsblatt, Abgabe).
+  programming courses, project work, quizzes or exams (Anmeldung, Kursplatz, Platzvergabe, Abmeldung).
+  This includes registrations run through a survey or form tool (e.g. "Registration to the programming
+  courses" on umfragen.tu-dortmund.de) as long as he still has to fill it in; only the survey tool's
+  "your response has been saved" confirmation is "other". Welcome / enrolment mails of a course
+  ("Willkommen zu <course>", "You are enrolled in ...") are "course" and important.
+- "exam": exam or quiz dates, rooms, allowed resources, results, reviews (Klausur, Prüfung, Einsicht),
+  and exam coaching / revision sessions of his courses.
+- "assignment": exercise sheets published, updated or corrected, solutions released, homework,
+  submission deadlines, due / overdue notices (Übungsblatt, Abgabe).
 - "deadline": any other dated action the student must take (fees, re-registration / Rückmeldung,
-  forms, documents, visa or enrolment office requests).
+  forms, documents, visa or enrolment office requests, account changes required by a date).
 - "course": anything about one of the programme modules above — lecture changes or cancellations,
-  room/time changes, new slides or videos, tutorials, forum posts from lecturers, welcome mails.
-  Moodle/LSF course mails (subject "lsf-<CODE>-...", sender "... via/über Moodle") belong here
-  unless a more specific category fits.
-- "announcement": official programme / examination-office / faculty notices that affect the student.
+  room/time changes, new slides or videos, tutorials, announcements from lecturers or tutors, welcome
+  mails; presentations of the seminars / case studies offered for the coming semester; optional extra
+  courses or intensive programmes open to MSc Data Science students (tele-courses, Blended Intensive
+  Programmes, additional electives). Moodle/LSF course mails (subject "lsf-<CODE>-...", sender
+  "... via/über Moodle") belong here unless a more specific category fits.
+- "announcement":
+  * official programme / examination-office / faculty notices that affect the student;
+  * personal replies from university staff or offices (International Office, Study Advisory,
+    examination office, lecturers, student registration office) to ${student}'s own inquiries about
+    his studies, internship, recognition, visa or documents — even if purely informational;
+    use "deadline" instead when they ask him to do something by a date (call today, send a document);
+  * student IT systems and accounts: outages or maintenance of Campusportal / LSF / Moodle / SSO /
+    university websites, mandatory re-configuration (eduroam), mandatory 2FA — use "deadline" if he
+    must act by a date;
+  * automated Campusportal / student registration office notices: new document available, student
+    status changed, re-registration processed, certificates available.
 
 NOT IMPORTANT (important = false, category "other"):
-- Invitations to events, talks, conferences, workshops, colloquia, info sessions, career or
-  company events, festivals, sports, surveys, newsletters, marketing, vendor mail, social posts —
-  even when sent by the university or the faculty.
-- Automated system mail that needs no action.
+- Invitations to events, talks, conferences, workshops, colloquia, info sessions, excursions, career or
+  company events, festivals, sports, elections, surveys (incl. teaching evaluations), newsletters /
+  Infobrief, marketing, vendor mail, social posts — even when sent by the university or the faculty.
+- Calls to apply for scholarships, stays abroad or external internship programmes that he did not ask about.
+- Moodle forum posts written by other students (questions or discussion in Q&A forums); only posts by
+  lecturers or tutors count as "course".
+- Mail written by ${student} himself (his own name or address in From, e.g. his replies in a thread).
+- Automated confirmations of his own actions or accounts: "submission received" / "Aufgabenlösung
+  übermittelt", badges, one-time passcodes, account activation or verification, plan expiry.
 
-Tiebreakers: registration beats every other category; an invitation is "other" unless it is a
-mandatory part of a programme module.
+Tiebreakers: registration beats every other category; an invitation is "other" unless it is part of a
+programme module or one of the optional study offers listed under "course" / "exam" above.
 
 "summary": one sentence (max 30 words) saying what it is and what to do; keep exact dates, times,
 rooms and deadlines; name the course. "reason": a few words on why it is (not) important.
-"deadline": when Hiro must act — the registration/submission/payment deadline, or the date of an exam or
-mandatory appointment he must attend — as "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM" (local German time) if a time is
-given. Resolve relative dates ("next Tuesday", "this week") against the email date. null if there is no such date.
+"deadline": the next date he must act on or may attend, for important mails only:
+- a registration / submission / payment / document deadline;
+- an exam, quiz, exam review (Einsicht) or exam coaching;
+- a dated course session announced in the mail: Q&A session, moved / extra / cancelled-and-replaced lecture
+  or tutorial, presentation of seminars / case studies;
+- an appointment or call he is asked to join (office hours "today", a meeting).
+Format "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" (local German time) when a time or start of a time slot is given
+("16 pm" = 16:00). Resolve relative dates ("tomorrow", "next Tuesday", "this week", "today") against the
+email date. If several dates are given, take the earliest one that is not before the email date.
+null for mails that are not important, and when no such date is given.
 
 Email date: ${date ? new Date(date).toISOString().slice(0, 10) : 'unknown'}
 From: ${from}
@@ -131,6 +166,7 @@ export async function classifyEmail(email, opts = {}) {
     from: email.from,
     subject: email.subject,
     snippet: email.snippet?.trim() || '(no content available)',
+    studentName: config.user?.name || '',
   });
 
   const ask = () => chat(prompt, apiKey, {

@@ -1,6 +1,7 @@
 # System Overview — Ziron
 
-> Updated: 2026-11-16. Describes the code as of this date (uncommitted working tree on top of `5ee2c7d`).
+> Updated: 2026-11-17. Describes the code as of this date (on top of `b203229`, plus photo input, price-sorted routing
+> and the revised mail classifier prompt).
 > The previous version of this file (2026-10-11) and `docs/audit/*` are historical — git history has them.
 
 ---
@@ -13,6 +14,7 @@ Telegram bot (`@hirojavisbot`, display name *Baymax*). One long-lived Node.js pr
 | Feature | Summary |
 |---|---|
 | **Chat agent** | Telegram messages → LLM (OpenRouter) with tools: reminders, weather, email search |
+| **Photos** | Photos / image files (and albums) are sent to the chat model (vision); only the current turn carries image data |
 | **Reminders** | One-shot, interval and recurring reminders with inline buttons (Done / Snooze) |
 | **University mail** | IMAP IDLE push on the TU Dortmund inbox → LLM classification → instant Telegram alert for important mail, with "show full mail" and "remind me before the deadline" buttons |
 | **Daily brief** | 07:00 brief for today, 21:00 brief for tomorrow: study / work / admin items from mail + scheduler |
@@ -87,9 +89,10 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 | `src/scheduler/poller.js` | 3 s tick: fires due jobs (claim-before-send) |
 | `src/channels/telegram/actions.js` | Inline button handlers: `done`, `snooze`, `mail`, `mremind`, legacy `delete` |
 | `src/channels/telegram/client.js` | grammY bot, commands, menu registration, 60 s request timeout |
+| `src/channels/telegram/media.js` | Photo input: size pick (≤ 1600 px), download (local Bot API → absolute path, else HTTP), album grouping (1.5 s) |
 | `src/tools/providers/email/watcher.js` | IMAP IDLE connection with reconnect/backoff |
 | `src/tools/providers/email/monitor.js` | Fetch new UIDs, classify, store, return important ones; `fetchFullEmail` |
-| `src/tools/providers/email/classifier.js` | LLM classification prompt (programme modules list, rules), JSON schema |
+| `src/tools/providers/email/classifier.js` | LLM classification prompt (programme modules list, rules of §12), JSON schema |
 | `src/tools/providers/email/index.js` | Notification text + inline keyboard (`buildEmailKeyboard`) |
 | `src/tools/providers/email/reminders.js` | Pure deadline-reminder planning |
 | `src/tools/providers/email/query.js` | `query_emails` tool (Mongo search) |
@@ -97,7 +100,8 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 | `src/services/briefData.js` | **Pure** brief selection: date extraction, email/schedule filters, formatting |
 | `src/services/beWatcher.js` | PM2/Docker status, alerts on state change only |
 | `src/utils/time.js` | All timezone logic (see §6) |
-| `src/providers/openrouter.js` | Low-level OpenRouter call (`complete`, `chat`), `PRIVATE_ROUTING` |
+| `src/providers/openrouter.js` | Low-level OpenRouter call (`complete`, `chat`), `PRIVATE_ROUTING`, `logUsage` |
+| `src/scripts/eval-classifier.mjs` + `eval-classifier-labels.json` | Classifier eval against 268 labelled mails (§11) |
 | `src/config/{index,schema}.js` | Config loading/merging; applies timezone + log level on load |
 
 ---
@@ -113,6 +117,10 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
    - every `calculate*` tool: `timezone` forced to the configured zone's current offset;
    - `deleteJob`: only jobs owned by that chat.
 5. Every 3 messages: background memory extraction.
+6. Photos (`message:photo`, image `message:document`): downloaded (jpeg/png/webp, ≤ 10 MB), album parts merged into one turn,
+   stored at `~/.ziron/media/<session>/`; the history record keeps `images: [{path, mime}]` and the caption as `content`.
+   `buildApiMessages` attaches the bytes (base64 → `image_url` data URL) only to the newest user message;
+   older ones become "[N photo(s) were attached here; no longer visible]". The chat model must accept images.
 
 ### 5.2 Reminder firing
 - `today_jobs` rows are fired by the poller when `date` (UTC) is today and `fire_at` (UTC `HH:mm[:ss]`) matches.
@@ -184,6 +192,7 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 | Path | Content |
 |---|---|
 | `sessions/<id>.jsonl`, `sessions/session-map.json` | Chat history; `role: summary` + `isCompactBoundary` marks compaction; `compactCopy` marks re-appended turns |
+| `media/<sessionId>/*.{jpg,png,webp}` | Photos sent in chat (not cleaned up automatically) |
 | `memory/{user,feedback,project,reference}.md` | `# Title` + `- item` lines, max 15 each |
 | `memory/MEMORY.md` | Generated index (all items), injected into the system prompt |
 | `memory/.state.json` | Extraction cursor per session (last processed message id) |
@@ -196,16 +205,26 @@ plain text** if Telegram rejects the Markdown ("can't parse entities"), so nothi
 
 | Use | Function | Model (config) | Notes |
 |---|---|---|---|
-| Chat + tools | `gateway.js` adapter | `providers.openrouter.model` | client passes `max_tokens: 8192`; strips leaked `<think>` text |
+| Chat + tools | `gateway.js` adapter | `providers.openrouter.model` | client passes `max_tokens: 8192`; strips leaked `<think>` text; photos as `image_url` data URLs → **model must accept images** |
 | Mail classification | `classifier.js` | `tools.email.classifierModel` (fallback: chat model) | JSON schema, temperature 0, 2000 tokens, retry once, fail-open (unparseable → important) |
 | History summary | `api/client.js` | chat model | reasoning low, 6000 tokens, retry once |
 | Memory rewrite | `memory/extractor.js` | chat model | only new messages, 3000 tokens |
 | Daily brief | `dailyBrief.js` | classifier model | only pre-selected data, 3 attempts |
 
-- Every request uses `provider: { data_collection: 'deny' }` (`PRIVATE_ROUTING`): only upstreams that do not store/train on prompts.
-- OpenRouter routes each call to a different upstream; occasionally one returns an empty completion → all callers retry.
+- Every request uses `provider: { data_collection: 'deny', sort: 'price', ignore: ['sail-research'] }` (`PRIVATE_ROUTING`):
+  only upstreams that do not store/train on prompts, always the cheapest one (currently Wafer, mxfp4; the next cheapest on
+  errors — about 2 % of calls in the full mail eval). Default load balancing picked a
+  random upstream per call, so the provider-side prompt cache never hit. 2026-11-17 measurements: 6 chat turns = 21 calls,
+  85 % of input tokens cached, ≈ $0.00023/call (was $0.0006–0.0013 for the same prompt); mail eval quality unchanged.
+  Sail Research (cheaper output, fp4) was tried and rejected: it missed 3 important mails in 2 of 2 runs; it is in `ignore`
+  because it was the fallback when Wafer failed. Re-run the classifier eval (§11) before changing the routing.
+- Each call logs `[LLM usage] <tag> via <provider> in= cached= out= cost=` (`logUsage` in `providers/openrouter.js`).
+- Occasionally an upstream returns an empty completion → all callers retry.
+- Prompt caching is implicit (provider-side prefix cache): keep static text first and per-call data last
+  (system prompt: rules before environment/memory; classifier: rules before the email).
 - Reasoning models spend part of `max_tokens` on thinking → keep generous limits (empty output otherwise).
-- Model choice (2026-11-16 evals, 47 hand-labelled mails + 6 scheduling chats): DeepSeek V4.1 Flash, Qwen3-235B, Claude Haiku 5.5, MiniMax M3.1 Flash all passed the chat eval after the timezone fix; DeepSeek and Qwen scored 47/47 on mail. DeepSeek chosen: fastest and cheapest.
+- Model choice (2026-11-16 evals, 47 hand-labelled mails + 6 scheduling chats): DeepSeek V4.1 Flash, Qwen3-235B, Claude Haiku 5.5, MiniMax M3.1 Flash all passed the chat eval after the timezone fix; DeepSeek and Qwen scored 47/47 on mail. DeepSeek chosen: fastest and cheapest. Since photo input the chat model must also accept images: Qwen3-235B-2507 is text-only
+  (its VL variant is not), Claude Haiku 5.5 and MiniMax M3.1 Flash accept images.
 
 ---
 
@@ -243,7 +262,7 @@ systemctl status tg-bot-api       # local Telegram Bot API server on :8082
 Healthy startup log lines: `Telegram bot started`, `[Scheduler] Started successfully`,
 `[Email IDLE] Watching INBOX (push mode)`, `[Brief] Daily brief at 07:00 … 21:00`, `[Voice] Disabled in config`.
 
-Telegram commands: `/start /help /newsession /ping /model /tasks /task_today /check_be /be_snapshot /brief [today|tomorrow]`.
+Telegram commands: `/start /help /newsession /ping /model /tasks /task_today /check_be /be_snapshot /brief [today|tomorrow]`. Photos and image files (incl. albums) go to the chat agent.
 `/tasks` and `/task_today` print local times.
 
 Chat capabilities the LLM has as tools: `calculateTime`, `calculateTimeRange`, `calculateRecurringDays`,
@@ -259,29 +278,47 @@ Chat capabilities the LLM has as tools: `calculateTime`, `calculateTimeRange`, `
 DST offsets, UTC↔local conversion, DST shift across midnight, specific dates after local midnight,
 `shouldRunToday` for arbitrary dates, the duplicate-send race, future-dated one-shots, date extraction,
 brief selection, deadline reminder planning, Markdown escaping and email buttons.
-`test/scheduler.test.mjs` sets `HOME` to a temp dir before importing, so it never touches `~/.ziron`.
+`test/media.test.mjs` covers photo input: size picking, image-file filter, album grouping, current-turn-only
+image data in `buildApiMessages`, missing files, and the `image_url` conversion.
+`test/scheduler.test.mjs` and `test/media.test.mjs` set `HOME` to a temp dir before importing, so they never touch `~/.ziron`.
 **Run `npm test` before every `pm2 restart ziron`.**
 
 Larger changes were also verified with throwaway scripts against **isolated copies**:
 - Run code with `HOME=<scratch dir>` containing copies of `~/.ziron/{scheduler,memory,sessions}` → real code, no live data touched.
 - Copy the repo (`src`, `config.json`, symlink `node_modules`) to switch models per run; drive `gateway.handleMessage` with real prompts and check what landed in SQLite.
 - Mongo tests use a separate database (`ziron_test`), dropped afterwards.
-- Classifier: hand-label real mails by the rules in §12, run each model, compare.
+- Classifier: `node src/scripts/eval-classifier.mjs [--model <id>] [--limit N] [--out f.json]` re-classifies the stored
+  mails (Mongo, read-only) and compares `important` with `src/scripts/eval-classifier-labels.json` (268 labels, uid → bool,
+  following §12). 2026-11-17 on DeepSeek V4.1 Flash via Wafer: old prompt 259/268 (8 missed), revised prompt 266/268
+  (0 missed, 2 extra: "Vorstellung Spezialgebiete"), identical over 3 runs; ≈ $0.045 per full run. Run it before changing
+  the prompt, model or routing.
 - Button handlers: call `handleInlineAction` with a fake grammY `ctx` (`callbackQuery`, `answerCallbackQuery`, `api.sendMessage`).
+- Vision: `new OpenRouterProviderAdapter(key, model).chat({ messages: [{ role: 'user', content: [text, { type: 'image', mediaType, data }] }] })`
+  with a generated test image (no real documents) checks that a model + private routing accepts images.
 - Back up before touching live data (`better-sqlite3` `db.backup()`, Mongo export to JSON).
 - Simulations that move a fake clock through future dates (midnight sync) mutate the copy (auto-disable of
   expired date-specific jobs, cleanup of past rows): use a **fresh copy per run**.
 
 ---
 
-## 12. Mail classification rules (from Hiro)
+## 12. Mail classification rules (from Hiro, revised 2026-11-17)
 
-- **Important**: registrations (courses, seminars, case studies, programming courses, exams), exams/quizzes/results,
-  exercise sheets and due/overdue notices, admin deadlines (fees, re-registration, documents), anything about a
-  module of the MSc Data Science handbook (ModHb_MSc_DaSc_2023_01; module list embedded in `classifier.js`),
-  Moodle/LSF course mails (`lsf-<CODE>-…`).
-- **Not important**: invitations to events, talks, conferences, workshops, colloquia, info sessions, company/career
-  events, surveys, newsletters, marketing — even from the faculty. (A registration *done via* a survey is still a registration.)
+- **Important**: registrations (courses, seminars, case studies, programming courses, quizzes, exams — also when run
+  through a survey/form tool), exams/quizzes/results/reviews and exam coaching, exercise sheets (new, updated,
+  solutions) and due/overdue notices, admin deadlines (fees, re-registration, documents), anything about a module of
+  the MSc Data Science handbook (ModHb_MSc_DaSc_2023_01; module list embedded in `classifier.js`), lecturer/tutor
+  posts in Moodle/LSF course mails (`lsf-<CODE>-…`), course welcome mails, seminar/case-study presentations,
+  optional extra courses open to MSc DS (tele-courses, BIP), personal replies from university staff/offices to
+  Hiro's own inquiries, student IT system notices (Campusportal/LSF/Moodle/SSO outages, eduroam, 2FA), automated
+  Campusportal notices (new document, status change, re-registration processed).
+- **Not important**: invitations to events, talks, conferences, workshops, colloquia, info sessions, excursions,
+  company/career events, elections, surveys and teaching evaluations, newsletters/Infobrief, marketing — even from the
+  faculty; calls for scholarships / stays abroad / external internship programmes; Moodle forum posts by other
+  students; mail Hiro wrote himself; automated confirmations (submission received, survey response saved, badges,
+  passcodes, account activation, plan expiry).
+- Missing an important mail is worse than an extra notification; the prompt says so.
+- `deadline`: next date to act on or attend (deadlines, exams, reviews, coaching, dated course sessions such as Q&A
+  or moved lectures, appointments he is asked to join); only on important mails. It enables the "⏰ Nhắc trước hạn" button.
 - `summary` and `reason` are always English.
 
 ---
@@ -293,6 +330,9 @@ Larger changes were also verified with throwaway scripts against **isolated copi
 - Webmail (`webmail.tu-dortmund.de`, Roundcube) is behind Anubis bot protection; headless browsers are blocked. Use IMAP.
 - Telegram legacy Markdown breaks on `_ * [ \``; dynamic text in notifications is escaped (`escapeMarkdown`), and the send wrapper falls back to plain text.
 - grammY long-poll holds requests ~30 s; client timeout is 60 s (must exceed it).
+- The local Bot API server runs with `--local`: `getFile` returns an absolute path under `/var/lib/telegram-bot-api/` (read directly);
+  with api.telegram.org it is a relative path downloaded via `/file/bot<token>/…`. `media.js` handles both.
+- The model sees only the photos of the current message; asked about an older one, it has only its earlier answer.
 - `deletePastTodayJobs` drops rows more than 10 s past due — a job that cannot be sent within 10 s is lost.
 - The memory file must never contain timezone offsets or reminder lists (scheduler + config are the sources of truth); the extractor prompt enforces this.
 - The scheduler "Checked/Done" button cancels **all remaining reminders of that task today** (e.g. later hourly smoke-sensor checks).
@@ -303,6 +343,7 @@ Larger changes were also verified with throwaway scripts against **isolated copi
 ## 14. Extending
 
 - **New chat tool**: schema in `src/tools/*.js` → `case` in `gateway.js:onToolCall` (apply server-side overrides for chatId/timezone/ownership) → mention in `prompts/system.js`.
+- **New input type** (e.g. voice notes, PDFs): handler in `channels/telegram/client.js` → download in `media.js` → pass to `handleMessage` → stored per session like `images`.
 - **New button**: `callback_data` `!act:<name>:<payload>` (≤ 64 bytes) → handler in `ACTION_REGISTRY` returning a string or `{ text|chunks, keepButtons }`.
 - **New scheduled job type**: one-shot rows in `today_jobs` (UTC `date` + `fire_at`, shared `ref_id`); recurring → master job with `tz_offset_min`.
 - **New LLM call**: use `complete()` from `providers/openrouter.js` (private routing by default); retry on empty content; send pre-selected text, not raw DB dumps.

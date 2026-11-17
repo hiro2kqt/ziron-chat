@@ -56,6 +56,57 @@ async function setSecureFileMode(filePath) {
 }
 
 // ============================================================================
+// Images
+// ============================================================================
+
+/** Directory for images sent in a session: ~/.ziron/media/<sessionId>/ */
+function resolveMediaDir(sessionId) {
+  return path.join(os.homedir(), '.ziron', 'media', sessionId);
+}
+
+const IMAGE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+/**
+ * Store an image of a session on disk. History records keep only the path,
+ * never the bytes, so the JSONL file stays small.
+ * @param {string} sessionId
+ * @param {Buffer} data
+ * @param {string} mime - image/jpeg | image/png | image/webp | image/gif
+ * @returns {Promise<{path: string, mime: string}>}
+ */
+export async function saveSessionImage(sessionId, data, mime) {
+  const dir = resolveMediaDir(sessionId);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${Date.now()}-${randomUUID().slice(0, 8)}.${IMAGE_EXT[mime] || 'bin'}`);
+  await fs.writeFile(file, data, { mode: 0o600 });
+  return { path: file, mime };
+}
+
+/**
+ * Content blocks for a stored user message. Images are attached only for the
+ * current turn (`withImages`); older ones become a short text note so a long
+ * history never re-sends megabytes of base64 on every call.
+ * @returns {Promise<Array|string>}
+ */
+async function userContent(msg, withImages) {
+  const images = Array.isArray(msg.images) ? msg.images : [];
+  if (images.length === 0) return msg.content;
+  if (!withImages) {
+    return `${msg.content}\n[${images.length} photo(s) were attached here; no longer visible]`;
+  }
+  const blocks = [{ type: 'text', text: msg.content }];
+  for (const img of images) {
+    try {
+      const data = await fs.readFile(img.path);
+      blocks.push({ type: 'image', mediaType: img.mime, data: data.toString('base64') });
+    } catch {
+      blocks.push({ type: 'text', text: '[a photo was attached but could not be loaded]' });
+    }
+  }
+  return blocks;
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -294,7 +345,29 @@ export async function buildApiMessages(sessionId) {
   const relevantMessages = messages.slice(startIndex);
   const result = [];
 
-  for (const msg of relevantMessages) {
+  // Images are sent only with the newest user message (the current turn,
+  // which stays the newest one through the whole tool loop)
+  let lastUserIdx = -1;
+  relevantMessages.forEach((m, i) => { if (m.role === 'user') lastUserIdx = i; });
+
+  for (const [idx, msg] of relevantMessages.entries()) {
+    if (msg.role === 'user') {
+      const content = await userContent(msg, idx === lastUserIdx);
+      const prev = result[result.length - 1];
+      if (prev && prev.role === 'user') {
+        // Merge consecutive user messages (array if either side has blocks)
+        if (typeof prev.content === 'string' && typeof content === 'string') {
+          prev.content = prev.content + '\n\n' + content;
+        } else {
+          if (typeof prev.content === 'string') prev.content = [{ type: 'text', text: prev.content }];
+          prev.content.push(...(typeof content === 'string' ? [{ type: 'text', text: content }] : content));
+        }
+      } else {
+        result.push({ role: 'user', content });
+      }
+      continue;
+    }
+
     // Summary of compacted history -> leading user message
     if (msg.role === 'summary') {
       if (result.length === 0) {
@@ -306,26 +379,7 @@ export async function buildApiMessages(sessionId) {
       continue;
     }
 
-    if (msg.role === 'user') {
-      // Merge consecutive user messages
-      if (result.length > 0 && result[result.length - 1].role === 'user') {
-        const lastMsg = result[result.length - 1];
-        
-        // If last message is an array (e.g. contains tool_result)
-        if (Array.isArray(lastMsg.content)) {
-          lastMsg.content.push({ type: 'text', text: msg.content });
-        } else {
-          // Both are strings
-          lastMsg.content = lastMsg.content + '\n\n' + msg.content;
-        }
-      } else {
-        // Add new user message
-        result.push({
-          role: 'user',
-          content: msg.content,
-        });
-      }
-    } else if (msg.role === 'assistant') {
+    if (msg.role === 'assistant') {
       // Add assistant message
       result.push({
         role: 'assistant',
@@ -397,4 +451,5 @@ export default {
   listSessions,
   truncateAndSummarize,
   buildApiMessages,
+  saveSessionImage,
 };

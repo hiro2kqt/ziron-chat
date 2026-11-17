@@ -16,6 +16,7 @@ import { handleMessage, resetSession, initScheduler, addOneshotJob, initEmailMon
 import { handleCallback } from '../scheduler/callbacks.js';
 import { handleInlineAction } from '../channels/telegram/actions.js';
 import { createAuthMiddleware } from '../channels/telegram/auth.js';
+import { imageOfMessage, downloadFile, createAlbumCollector } from '../channels/telegram/media.js';
 import { startVoiceServer } from '../channels/voice/server.js';
 import { checkStatus, formatStatusMessage, initBeWatcher, takeSnapshot } from '../services/beWatcher.js';
 import logger from '../utils/logger.js';
@@ -92,8 +93,49 @@ export async function connectCommand() {
     logger.info('Bot ID:', me.id);
     logger.info('');
 
+    // Photos: download right away, send albums as one turn
+    const answerPhotos = async (ctx, items) => {
+      const results = await Promise.allSettled(items.map(i => i.download));
+      const images = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+      results.filter(r => r.status === 'rejected')
+        .forEach(r => logger.warn('[Photo] Download failed:', r.reason?.message));
+      if (images.length === 0) {
+        await replyTo(ctx, '❌ Không tải được ảnh.');
+        return;
+      }
+      // Album caption sits on one of the parts (usually the first)
+      const caption = items.map(i => i.caption).filter(Boolean).join('\n');
+      logger.info(`[Photo] ${images.length} image(s), caption: ${caption.slice(0, 80)}`);
+      try {
+        await replyWithPlaceholder(ctx, () => handleMessage({
+          channelType: 'telegram',
+          channelId: ctx.chat.id,
+          userMessage: caption || `[sent ${images.length > 1 ? `${images.length} photos` : 'a photo'} without text]`,
+          images,
+        }));
+      } catch (err) {
+        logger.error('Gateway error (photo):', err.message);
+      }
+    };
+    const collectPhoto = createAlbumCollector(answerPhotos);
+
     // Message handlers
     const handlers = {
+      onPhoto: async (ctx) => {
+        const image = imageOfMessage(ctx.message);
+        if (!image) return; // non-image document
+        if (!provider) {
+          await replyTo(ctx, '⚠️ No AI provider configured. Cannot respond.');
+          return;
+        }
+        const download = downloadFile(ctx.api, image.fileId, {
+          botToken: config.telegram.botToken,
+          apiRoot: config.telegram.apiRoot,
+        }).then(data => ({ data, mime: image.mime }));
+        download.catch(() => {}); // handled in answerPhotos
+        await collectPhoto(ctx, { download, caption: ctx.message.caption || '' });
+      },
+
       onMessage: async (ctx) => {
         const text = ctx.message.text;
 

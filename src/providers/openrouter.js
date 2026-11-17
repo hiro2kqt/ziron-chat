@@ -3,12 +3,33 @@
  * Simplified implementation - OpenAI-compatible API
  */
 
+import logger from '../utils/logger.js';
+
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_MODEL = 'anthropic/claude-3.5-sonnet';
 const DEFAULT_MAX_TOKENS = 4096;
 // Route only to upstreams that don't store or train on prompts: requests carry
 // personal mail, schedules and chat. Override per call with options.provider.
-export const PRIVATE_ROUTING = { data_collection: 'deny' };
+// sort: 'price' = always the cheapest eligible upstream (next one on errors).
+// Default load balancing picked a random upstream per call, so the
+// provider-side prompt cache never hit: 3-7x the cost of a cached call.
+// ignore: sail-research (fp4) missed important mails in the 2026-11-17 eval;
+// it was the fallback when the cheapest upstream failed (5 of 268 calls).
+export const PRIVATE_ROUTING = { data_collection: 'deny', sort: 'price', ignore: ['sail-research'] };
+
+/**
+ * One log line per call: upstream, tokens, cache hits, cost. Keeps routing
+ * and spend visible in `pm2 logs ziron`.
+ * @param {string} tag - caller, e.g. 'chat' or the model id
+ * @param {Object} data - OpenRouter response JSON
+ */
+export function logUsage(tag, data) {
+  const u = data?.usage;
+  if (!u) return;
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  const cost = typeof u.cost === 'number' ? ` cost=${u.cost.toFixed(6)}` : '';
+  logger.info(`[LLM usage] ${tag} via ${data.provider || '?'} in=${u.prompt_tokens} cached=${cached} out=${u.completion_tokens}${cost}`);
+}
 
 /**
  * @typedef {Object} Message
@@ -70,7 +91,9 @@ export async function complete(messages, apiKey, options = {}) {
     throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
   }
 
-  return await response.json();
+  const data = await response.json();
+  logUsage(options.usageTag || payload.model, data);
+  return data;
 }
 
 /**

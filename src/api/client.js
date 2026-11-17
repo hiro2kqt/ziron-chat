@@ -79,6 +79,7 @@ export class ZironClient {
    * @param {string} params.systemPrompt - System prompt for the LLM
    * @param {Array} [params.tools] - Optional tool definitions
    * @param {Function} [params.onToolCall] - Optional callback for tool execution
+   * @param {Array<{path: string, mime: string}>} [params.images] - Images attached to this message
    * @returns {Promise<string>} The final assistant response text
    *
    * @throws {Error} If tool calling fails or LLM returns error
@@ -149,7 +150,7 @@ export class ZironClient {
   }
 
   async run(params) {
-    const { sessionId, userMessage, systemPrompt, tools, onToolCall } = params;
+    const { sessionId, userMessage, systemPrompt, tools, onToolCall, images } = params;
 
     await this.compactIfNeeded(sessionId);
 
@@ -163,6 +164,8 @@ export class ZironClient {
       toolUseId: null,
       isError: false,
       isCompactBoundary: false,
+      // [{path, mime}] stored by saveSessionImage; sent only with this turn
+      ...(images?.length ? { images } : {}),
     });
 
     // Tool calling loop
